@@ -1,0 +1,16 @@
+.{
+    .name = "examples",
+    .version = "0.0.0",
+    .minimum_zig_version = "0.14.0-dev.1359+e9a00ba7f",
+    .dependencies = .{
+        .cpp2ast = .{
+            // should be replaced with the archive url and hash of `cpp2ast` package in real projects
+            .path = "../",
+            .lazy = false,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+}

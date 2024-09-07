@@ -1,0 +1,10 @@
+.zig/
+.zig-cache/
+zig-out/
+clang/
+clang-18.1.7/
+.vscode/
+.vs/
+.venv/
+.tmp/
+.zig-global-cache/

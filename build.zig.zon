@@ -1,0 +1,44 @@
+.{
+    // This is the default name used by packages depending on this one. For
+    // example, when a user runs `zig fetch --save <url>`, this field is used
+    // as the key in the `dependencies` table. Although the user can choose a
+    // different name, most users will stick with this provided value.
+    //
+    // It is redundant to include "zig" in this name because it is already
+    // within the Zig package namespace.
+    .name = "cpp2ast",
+
+    // This is a [Semantic Version](https://semver.org/).
+    // In a future version of Zig it will be used for package deduplication.
+    .version = "0.0.1",
+
+    // This field is optional.
+    // This is currently advisory only; Zig does not yet do anything
+    // with this value.
+    .minimum_zig_version = "0.14.0-dev.1359+e9a00ba7f",
+
+    // This field is optional.
+    // Each dependency must either provide a `url` and `hash`, or a `path`.
+    // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
+    // Once all dependencies are fetched, `zig build` no longer requires
+    // internet connectivity.
+    .dependencies = .{
+        .@"clang-18.1.7-headers" = .{
+            .url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.7/clang-18.1.7.src.tar.xz",
+            .hash = "1220d8834d820d6fa8df56bc632de5d8c6a9be77132d09bf1ce3834b8f4c0fa1e897",
+            .lazy = true,
+        },
+        .@"zig-buildext" = .{
+            .url = "https://github.com/IamSanjid/zig-buildext/archive/refs/heads/master.tar.gz",
+            .hash = "12207fb532c4f85036fee69234f536a2baac906afc8df72cbb8ce795c0f649ccbecd",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test-sources",
+        "LICENSE",
+        "README.md",
+    },
+}
