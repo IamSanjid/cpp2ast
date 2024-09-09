@@ -38,15 +38,23 @@ pub fn main() !void {
 
     if (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "index_enum_to_zig")) {
-            const save_file_name = "index.zig";
             const inc_header_path = args.next() orelse @panic("Need header include path!");
+            
             const basic_str = try index_enum_to_zig.bindings(allocator, inc_header_path);
             defer basic_str.deinit();
-            var file = try std.fs.cwd().createFile(save_file_name, .{});
+
+            const out_dir_path = try std.fs.selfExeDirPathAlloc(allocator);
+            defer allocator.free(out_dir_path);
+            var out_dir = try std.fs.openDirAbsolute(out_dir_path, .{});
+            defer out_dir.close();
+            
+            const save_file_name = "index.zig";
+            var file = try out_dir.createFile(save_file_name, .{});
             defer file.close();
             try file.writeAll(basic_str.str());
-            const save_file_path = try std.fs.cwd().realpathAlloc(allocator, save_file_name);
+            const save_file_path = try out_dir.realpathAlloc(allocator, save_file_name);
             defer allocator.free(save_file_path);
+            
             std.debug.print("Saved as {s}\n", .{save_file_path});
             return;
         }
