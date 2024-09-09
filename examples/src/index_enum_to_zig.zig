@@ -19,7 +19,7 @@ pub fn bindings(allocator: std.mem.Allocator, header_path: []const u8) !BasicStr
     const index_header = try std.fs.path.join(allocator, &.{ header_path, "clang-c", "Index.h" });
     defer allocator.free(index_header);
 
-    // every source is parsed as c++ by the "default" function,
+    // `createTranslationUnitDefault` will treat every source as c++ by passing `-x c++` option to libclang,
     // if need to control everything `clang.TranslationUnit.parse` can be used
     var translation_unit = try cpp2ast.traversers.createTranslationUnitDefault(
         allocator,
