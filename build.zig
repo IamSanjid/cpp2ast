@@ -95,7 +95,7 @@ fn buildTests(build_context: BuildContext) !void {
         test_comp.linkage = .dynamic;
     }
     // for running tests...
-    try addClangRtInfos(&test_comp.root_module);
+    try addCCXXIncludes(&test_comp.root_module);
     if (build_context.getClangIncludeDir()) |dir| {
         test_comp.addIncludePath(dir);
     }
@@ -239,34 +239,43 @@ const BuildContext = struct {
     }
 };
 
-const ClangRuntime = struct {
-    libcxx_dir: [:0]const u8,
-    include_dir: [:0]const u8,
+const CCXXIncludes = struct {
+    libcxx: [:0]const u8,
+    clang_rt: [:0]const u8,
+    libc: []const [:0]const u8,
 
     const Self = @This();
-    fn fromBuild(b: *std.Build) !Self {
+    fn fromBuild(b: *std.Build, target: std.Target) !Self {
         const zig_lib_dir = b.graph.zig_lib_directory.handle;
+        const zig_lib_dir_path = try zig_lib_dir.realpathAlloc(b.allocator, ".");
+        const libc_dirs = try std.zig.LibCDirs.detect(b.allocator, zig_lib_dir_path, target, true, true, null);
+        var libc_inc_dirs = std.ArrayList([:0]const u8).init(b.allocator);
+        for (libc_dirs.libc_include_dir_list) |dir| {
+            libc_inc_dirs.append(b.allocator.dupeZ(u8, dir) catch @panic("OOM")) catch @panic("OOM");
+        }
         return Self{
-            .libcxx_dir = try b.allocator.dupeZ(
+            .libcxx = try b.allocator.dupeZ(
                 u8,
                 try zig_lib_dir.realpathAlloc(b.allocator, "libcxx/include"),
             ),
-            .include_dir = try b.allocator.dupeZ(
+            .clang_rt = try b.allocator.dupeZ(
                 u8,
                 try zig_lib_dir.realpathAlloc(b.allocator, "include"),
             ),
+            .libc = libc_inc_dirs.items,
         };
     }
 };
 
-fn addClangRtInfos(module: *std.Build.Module) !void {
+fn addCCXXIncludes(module: *std.Build.Module) !void {
     const b = module.owner;
-    const clang_runtime_options = b.addOptions();
-    module.addOptions("clang_runtime", clang_runtime_options);
+    const runtime_includes_options = b.addOptions();
+    module.addOptions("c_cxx_includes", runtime_includes_options);
 
-    const clang_rt = try ClangRuntime.fromBuild(b);
-    clang_runtime_options.addOption([:0]const u8, "include_dir", clang_rt.include_dir);
-    clang_runtime_options.addOption([:0]const u8, "libcxx_dir", clang_rt.libcxx_dir);
+    const rt_includes = try CCXXIncludes.fromBuild(b, module.resolved_target.?.result);
+    runtime_includes_options.addOption([:0]const u8, "clang_rt", rt_includes.clang_rt);
+    runtime_includes_options.addOption([:0]const u8, "libcxx", rt_includes.libcxx);
+    runtime_includes_options.addOption([]const [:0]const u8, "libc", rt_includes.libc);
 }
 
 const LinkingLibClangInfo = struct {
@@ -497,7 +506,7 @@ const LinkingLibClangInfo = struct {
 fn linkLibClangToCompileStep(exe: *std.Build.Step.Compile, build_context: BuildContext) !void {
     const target = build_context.options.target;
 
-    try addClangRtInfos(&exe.root_module);
+    try addCCXXIncludes(&exe.root_module);
 
     const exclude_files: ?[]const []const u8 = &.{
         "libMLIRMlirOptMain.a",

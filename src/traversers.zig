@@ -14,6 +14,7 @@ pub fn createTranslationUnitDefault(
     allocator: std.mem.Allocator,
     cpp_files: []const []const u8,
     inc_dirs: []const []const u8,
+    system_inc_dirs: []const []const u8,
 ) !clang.TranslationUnit {
     var args = std.ArrayList([*:0]const u8).init(allocator);
     var copied_inc_dirZ = std.ArrayList([:0]const u8).init(allocator);
@@ -24,8 +25,17 @@ pub fn createTranslationUnitDefault(
         copied_inc_dirZ.deinit();
         args.deinit();
     }
-    for (inc_dirs) |inc_dir| {
+    for (system_inc_dirs) |system_inc_dir| {
         try args.append("-isystem");
+
+        const system_inc_dirz = try allocator.dupeZ(u8, system_inc_dir);
+        errdefer allocator.free(system_inc_dirz);
+
+        try copied_inc_dirZ.append(system_inc_dirz);
+        try args.append(system_inc_dirz);
+    }
+    for (inc_dirs) |inc_dir| {
+        try args.append("-I");
 
         const inc_dirz = try allocator.dupeZ(u8, inc_dir);
         errdefer allocator.free(inc_dirz);
@@ -33,8 +43,10 @@ pub fn createTranslationUnitDefault(
         try copied_inc_dirZ.append(inc_dirz);
         try args.append(inc_dirz);
     }
+    try args.append("--no-default-config");
     try args.append("-x");
     try args.append("c++");
+    try args.append("-Xclang");
     try args.append("-std=c++20");
     try args.append("-DWIN32_LEAN_AND_MEAN");
     try args.append("-fparse-all-comments");
@@ -58,7 +70,8 @@ pub fn createTranslationUnitDefault(
     return clang.TranslationUnit.parse(.{
         .args = args.items,
         .unsaved_files = temp_files,
-        .skip_function_bodies = true,
+        .record_detailed_preproessing = true,
+        .skip_function_bodies = false,
     });
 }
 
@@ -67,12 +80,13 @@ pub fn createDummyTranslationUnit(
     allocator: std.mem.Allocator,
     cpp_file_path: []const u8,
 ) !clang.TranslationUnit {
-    const clang_include_dir = @import("clang_runtime").include_dir;
+    const include_dir = @import("c_cxx_includes").clang_rt;
 
     return createTranslationUnitDefault(
         allocator,
         &.{cpp_file_path},
-        &.{clang_include_dir},
+        &.{},
+        &.{include_dir},
     );
 
     //var argv = std.ArrayList([*:0]const u8).init(allocator);
@@ -156,37 +170,39 @@ pub const TypeTag = enum {
     Function,
     Raw,
 
+    // Really hope one of this becomes something https://github.com/ziglang/zig/issues/15556
     pub fn fromType(c_type: clang.Type) @This() {
-        return switch (c_type.kind()) {
-            c.CXType_Void => .Void,
-            c.CXType_Bool => .Bool,
-            c.CXType_Short...c.CXType_LongLong,
-            c.CXType_SChar,
-            c.CXType_WChar,
-            c.CXType_Char16,
-            c.CXType_Char32,
-            c.CXType_Char_S,
+        const type_tag: clang.TypeKind.TagType = @intFromEnum(c_type.kind());
+        return switch (type_tag) {
+            @intFromEnum(clang.TypeKind.Void) => .Void,
+            @intFromEnum(clang.TypeKind.Bool) => .Bool,
+            @intFromEnum(clang.TypeKind.Short)...@intFromEnum(clang.TypeKind.LongLong),
+            @intFromEnum(clang.TypeKind.SChar),
+            @intFromEnum(clang.TypeKind.WChar),
+            @intFromEnum(clang.TypeKind.Char16),
+            @intFromEnum(clang.TypeKind.Char32),
+            @intFromEnum(clang.TypeKind.Char_S),
             => .Int,
-            c.CXType_UShort...c.CXType_ULongLong,
-            c.CXType_Char_U,
-            c.CXType_UChar,
+            @intFromEnum(clang.TypeKind.UShort)...@intFromEnum(clang.TypeKind.ULongLong),
+            @intFromEnum(clang.TypeKind.Char_U),
+            @intFromEnum(clang.TypeKind.UChar),
             => .UInt,
-            c.CXType_UInt128 => .UInt128,
-            c.CXType_Float...c.CXType_LongDouble => .Float,
-            c.CXType_Float128 => .Float128,
-            c.CXType_Half,
-            c.CXType_Float16,
+            @intFromEnum(clang.TypeKind.UInt128) => .UInt128,
+            @intFromEnum(clang.TypeKind.Float)...@intFromEnum(clang.TypeKind.LongDouble) => .Float,
+            @intFromEnum(clang.TypeKind.Float128) => .Float128,
+            @intFromEnum(clang.TypeKind.Half),
+            @intFromEnum(clang.TypeKind.Float16),
             => .Float,
-            c.CXType_Complex => @panic("TODO: Handle complex type"),
-            c.CXType_ConstantArray...c.CXType_DependentSizedArray => .Array,
-            c.CXType_Pointer,
-            c.CXType_RValueReference,
-            c.CXType_LValueReference,
-            c.CXType_MemberPointer,
-            c.CXType_BlockPointer,
-            c.CXType_ObjCObjectPointer,
+            @intFromEnum(clang.TypeKind.Complex) => @panic("TODO: Handle complex type"),
+            @intFromEnum(clang.TypeKind.ConstantArray)...@intFromEnum(clang.TypeKind.DependentSizedArray) => .Array,
+            @intFromEnum(clang.TypeKind.Pointer),
+            @intFromEnum(clang.TypeKind.RValueReference),
+            @intFromEnum(clang.TypeKind.LValueReference),
+            @intFromEnum(clang.TypeKind.MemberPointer),
+            @intFromEnum(clang.TypeKind.BlockPointer),
+            @intFromEnum(clang.TypeKind.ObjCObjectPointer),
             => .Pointer,
-            c.CXType_FunctionProto, c.CXType_FunctionNoProto => .Function,
+            @intFromEnum(clang.TypeKind.FunctionProto), @intFromEnum(clang.TypeKind.FunctionNoProto) => .Function,
             else => .Raw,
         };
     }
@@ -273,17 +289,18 @@ const ConstLiteral = union(TypeTag) {
 pub const EnumType = struct {
     cursor: clang.Cursor,
     variants: std.ArrayList(Variant),
+    tag_type: TypeTag,
 
     const Self = @This();
 
     const Variant = struct { clang.Cursor, ?ConstLiteral };
 
     pub fn fromType(allocator: std.mem.Allocator, c_type: clang.Type) !Self {
-        if (c_type.kind() != c.CXType_Enum) @panic("Didn't receive enum type");
+        if (c_type.kind() != clang.TypeKind.Enum) @panic("Didn't receive enum type");
         const declaration = c_type.declaration().canonical();
         const enum_type = declaration.enumType().?;
         const definition = declaration.definition() orelse declaration;
-        const type_tag = TypeTag.fromType(enum_type);
+        const tag_type = TypeTag.fromType(enum_type);
 
         var childs = try definition.collectChildren(allocator);
         defer childs.deinit();
@@ -291,16 +308,17 @@ pub const EnumType = struct {
         var instance = Self{
             .cursor = definition,
             .variants = std.ArrayList(Variant).init(allocator),
+            .tag_type = tag_type,
         };
         for (childs.items) |child| {
-            if (child.kind() == c.CXCursor_EnumConstantDecl) {
-                const variant_value: ConstLiteral = switch (type_tag) {
+            if (child.kind() == clang.CursorKind.EnumConstantDecl) {
+                const variant_value: ConstLiteral = switch (tag_type) {
                     .Bool, .Int => ConstLiteral.fromTag(
-                        type_tag,
+                        tag_type,
                         child.enumValue().?,
                     ),
                     .UInt => ConstLiteral.fromTag(
-                        type_tag,
+                        tag_type,
                         child.enumUnsignedValue().?,
                     ),
                     else => @panic("Enum shouldn't have any other types as their base other than int"),
@@ -313,7 +331,7 @@ pub const EnumType = struct {
         return instance;
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: Self) void {
         self.variants.deinit();
     }
 };
@@ -328,7 +346,7 @@ pub inline fn c_typeToCanonTypeDef(c_type: clang.Type) clang.Cursor {
 pub inline fn c_typeToCanonTypeDefFallible(c_type: clang.Type) ?clang.Cursor {
     const result = c_typeToCanonTypeDef(c_type);
 
-    return if (result.isInvalid() or result.kind() == c.CXCursor_NoDeclFound)
+    return if (result.isInvalid() or result.kind() == clang.CursorKind.NoDeclFound)
         null
     else
         result;
@@ -351,8 +369,8 @@ pub inline fn cursorToDeclType(cursor: clang.Cursor) clang.Type {
                 const c_type = current_cur.c_type();
 
                 const new_c_type = switch (c_type.kind()) {
-                    c.CXType_Elaborated => c_type.namedType(),
-                    c.CXType_Typedef => current_cur.typedefType() orelse @panic("Typedef invalid?"),
+                    clang.TypeKind.Elaborated => c_type.namedType(),
+                    clang.TypeKind.Typedef => current_cur.typedefType() orelse @panic("Typedef invalid?"),
                     else => {
                         break :blk last_c_type;
                     },
@@ -427,7 +445,7 @@ pub const DeclInfo = struct {
     }
 
     fn hasTemplateInstantiationImpl(cur: clang.Cursor) bool {
-        if (cur.kind() == c.CXCursor_TemplateRef) return true;
+        if (cur.kind() == clang.CursorKind.TemplateRef) return true;
 
         const checker = struct {
             fn func(found: *bool, current: clang.Cursor, _: clang.Cursor) !void {
@@ -465,9 +483,9 @@ pub const FunctionInfo = struct {
 
     pub fn isCurTemplate(cur: clang.Cursor) bool {
         const kind = cur.kind();
-        if (kind == c.CXCursor_FunctionTemplate) return true;
+        if (kind == clang.CursorKind.FunctionTemplate) return true;
 
-        if (kind == c.CXCursor_Constructor or kind == c.CXCursor_Destructor) {
+        if (kind == clang.CursorKind.Constructor or kind == clang.CursorKind.Destructor) {
             const spelling_raw = cur.spellingRaw();
             defer spelling_raw.deinit();
 
@@ -518,8 +536,8 @@ pub const FunctionInfo = struct {
                 .Array => cur_c_type.elemType() orelse unreachable,
                 else => blk: {
                     break :blk switch (cur_c_type.kind()) {
-                        c.CXType_Elaborated => cur_c_type.namedType(),
-                        c.CXType_Typedef => cursor.typedefType() orelse
+                        clang.TypeKind.Elaborated => cur_c_type.namedType(),
+                        clang.TypeKind.Typedef => cursor.typedefType() orelse
                             return Error.InvalidFuncCursor,
                         else => cur_c_type,
                     };
@@ -540,7 +558,7 @@ pub const FunctionInfo = struct {
                 }
             }
         }.func;
-        _ = cursor.visit(bool, template_checker, &is_template);
+        _ = cursor.visit(&is_template, template_checker);
 
         if (is_template) return Error.TemplateFunc;
 
@@ -557,15 +575,15 @@ pub const FunctionInfo = struct {
 
     pub fn args(self: Self, allocator: std.mem.Allocator) !std.ArrayList(clang.Cursor) {
         return switch (self.cursor.kind()) {
-            c.CXCursor_FunctionDecl,
-            c.CXCursor_Constructor,
-            c.CXCursor_CXXMethod,
-            c.CXCursor_ObjCInstanceMethodDecl,
-            c.CXCursor_ObjCClassMethodDecl,
+            clang.CursorKind.FunctionDecl,
+            clang.CursorKind.Constructor,
+            clang.CursorKind.CXXMethod,
+            clang.CursorKind.ObjCInstanceMethodDecl,
+            clang.CursorKind.ObjCClassMethodDecl,
             => {
                 return self.cursor.arguments(allocator) orelse Error.InvalidFuncCursor;
             },
-            c.CXCursor_Destructor => std.ArrayList(clang.Cursor).init(allocator),
+            clang.CursorKind.Destructor => std.ArrayList(clang.Cursor).init(allocator),
             else => blk: {
                 var args_list = std.ArrayList(clang.Cursor).init(allocator);
                 const args_parser = struct {
@@ -575,14 +593,14 @@ pub const FunctionInfo = struct {
                         _: clang.Cursor,
                     ) !void {
                         switch (cur.kind()) {
-                            c.CXCursor_ParmDecl => {
+                            clang.CursorKind.ParmDecl => {
                                 try list.append(cur);
                             },
                             else => {},
                         }
                     }
                 }.func;
-                _ = self.cursor.visit(std.ArrayList(clang.Cursor), args_parser, &args_list);
+                _ = self.cursor.visit(&args_list, args_parser);
                 if (args_list.items.len == 0) {
                     if (self.cursor.arguments(allocator)) |fallback_args| {
                         args_list = fallback_args;
@@ -606,15 +624,15 @@ pub const FunctionInfo = struct {
     }
 
     pub fn isConstructor(self: Self) bool {
-        return self.cursor.kind() == c.CXCursor_Constructor;
+        return self.cursor.kind() == clang.CursorKind.Constructor;
     }
 
     pub fn isDestructor(self: Self) bool {
-        return self.cursor.kind() == c.CXCursor_Destructor;
+        return self.cursor.kind() == clang.CursorKind.Destructor;
     }
 
     pub fn isCXXMethod(self: Self) bool {
-        return self.cursor.kind() == c.CXCursor_CXXMethod;
+        return self.cursor.kind() == clang.CursorKind.CXXMethod;
     }
 
     pub fn isOperator(self: Self) bool {
@@ -636,12 +654,12 @@ pub const CompoundType = struct {
 
     pub fn isValidCursor(cur: clang.Cursor) bool {
         return switch (cur.kind()) {
-            c.CXCursor_UnionDecl => true,
-            c.CXCursor_ClassDecl, c.CXCursor_StructDecl => true,
-            c.CXCursor_CXXBaseSpecifier => true,
+            clang.CursorKind.UnionDecl => true,
+            clang.CursorKind.ClassDecl, clang.CursorKind.StructDecl => true,
+            clang.CursorKind.CXXBaseSpecifier => true,
             // TODO: Parse template classes?
-            c.CXCursor_ClassTemplatePartialSpecialization,
-            c.CXCursor_ClassTemplate,
+            clang.CursorKind.ClassTemplatePartialSpecialization,
+            clang.CursorKind.ClassTemplate,
             => false,
             else => false,
         };
@@ -668,7 +686,7 @@ pub const CompoundType = struct {
             .inner_decls = CursorList.init(allocator),
         };
 
-        _ = cursor.visit(Self, Self.performParsing, &comp_type);
+        _ = cursor.visit(&comp_type, Self.performParsing);
 
         return comp_type;
     }
@@ -677,25 +695,25 @@ pub const CompoundType = struct {
         // TODO: Parse all private fields/methods, templates?
         if (!cur.isPubliclyAccessible()) return;
         switch (cur.kind()) {
-            c.CXCursor_Constructor => {
+            clang.CursorKind.Constructor => {
                 try self.constructors.append(cur);
             },
-            c.CXCursor_Destructor => {
+            clang.CursorKind.Destructor => {
                 std.debug.assert(self.destructor == null);
                 self.destructor = cur;
             },
-            c.CXCursor_CXXMethod => {
+            clang.CursorKind.CXXMethod => {
                 try self.methods.append(cur);
             },
-            c.CXCursor_VarDecl, c.CXCursor_FieldDecl => {
+            clang.CursorKind.VarDecl, clang.CursorKind.FieldDecl => {
                 try self.fields.append(cur);
             },
-            c.CXCursor_CXXBaseSpecifier => {
+            clang.CursorKind.CXXBaseSpecifier => {
                 // TODO: private,virtual ones too?
                 if (cur.accessSpecifier() == c.CX_CXXPublic)
                     try self.base_specifiers.append(c_typeToCanonTypeDef(cur.c_type()));
             },
-            c.CXCursor_TypedefDecl, c.CXCursor_TypeAliasDecl => {
+            clang.CursorKind.TypedefDecl, clang.CursorKind.TypeAliasDecl => {
                 try self.inner_decls.append(cur);
             },
             else => {
@@ -718,7 +736,7 @@ pub const CompoundType = struct {
         return self.cursor.spelling(allocator);
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: Self) void {
         self.constructors.deinit();
         self.fields.deinit();
         self.methods.deinit();
@@ -737,7 +755,7 @@ test "enum type info test" {
         cpp_file_path,
     );
     defer translation_unit.deinit();
-    try translation_unit.printDiags();
+    try translation_unit.printAndCheckDiags();
 
     var root_cursor = translation_unit.cursor();
 
@@ -746,7 +764,7 @@ test "enum type info test" {
     try std.testing.expect(ns_childs.items.len > 0);
 
     for (ns_childs.items) |child| {
-        if (child.isInSystemHeader() or child.kind() != c.CXCursor_Namespace) continue;
+        if (child.isInSystemHeader() or child.kind() != clang.CursorKind.Namespace) continue;
         root_cursor = child;
         break;
     }
@@ -758,7 +776,7 @@ test "enum type info test" {
     var found_enum_decl = false;
     var encounters: usize = 0;
     for (childs.items) |child| {
-        if (child.isInSystemHeader() or child.kind() != c.CXCursor_EnumDecl) continue;
+        if (child.isInSystemHeader() or child.kind() != clang.CursorKind.EnumDecl) continue;
         encounters += 1;
 
         var enum_decl = try EnumType.fromType(allocator, child.c_type());
@@ -887,7 +905,7 @@ test "basic method/function info" {
         cpp_file_path,
     );
     defer translation_unit.deinit();
-    try translation_unit.printDiags();
+    try translation_unit.printAndCheckDiags();
 
     var root_cursor = translation_unit.cursor();
 
@@ -896,7 +914,7 @@ test "basic method/function info" {
     try std.testing.expect(ns_childs.items.len > 0);
 
     for (ns_childs.items) |child| {
-        if (child.isInSystemHeader() or child.kind() != c.CXCursor_Namespace) continue;
+        if (child.isInSystemHeader() or child.kind() != clang.CursorKind.Namespace) continue;
         root_cursor = child;
         break;
     }
@@ -909,11 +927,11 @@ test "basic method/function info" {
     var var_decl_cases: usize = 0;
     for (childs.items) |child| {
         switch (child.kind()) {
-            c.CXCursor_FunctionDecl,
-            c.CXCursor_Constructor,
-            c.CXCursor_CXXMethod,
-            c.CXCursor_ObjCInstanceMethodDecl,
-            c.CXCursor_ObjCClassMethodDecl,
+            clang.CursorKind.FunctionDecl,
+            clang.CursorKind.Constructor,
+            clang.CursorKind.CXXMethod,
+            clang.CursorKind.ObjCInstanceMethodDecl,
+            clang.CursorKind.ObjCClassMethodDecl,
             => {
                 fn_decl_cases += 1;
                 const func = try FunctionInfo.fromCur(child);
@@ -928,7 +946,7 @@ test "basic method/function info" {
                     else => {},
                 }
             },
-            c.CXCursor_VarDecl => {
+            clang.CursorKind.VarDecl => {
                 const vi = DeclInfo.fromCur(child);
                 var_decl_cases += 1;
 
@@ -964,11 +982,11 @@ test "basic method/function info" {
                         try std.testing.expectEqual(.Int, func.ret_type);
 
                         var child_c_type_def = c_typeToCanonTypeDefFallible(child.c_type());
-                        try std.testing.expectEqual(c.CXCursor_TypeAliasDecl, child_c_type_def.?.kind());
+                        try std.testing.expectEqual(clang.CursorKind.TypeAliasDecl, child_c_type_def.?.kind());
                         child_c_type_def = c_typeToCanonTypeDefFallible(child_c_type_def.?.typedefType().?);
-                        try std.testing.expectEqual(c.CXCursor_TypedefDecl, child_c_type_def.?.kind());
+                        try std.testing.expectEqual(clang.CursorKind.TypedefDecl, child_c_type_def.?.kind());
                         //child_c_type_def = c_typeToCanonTypeDef(child_c_type_def.?.typedefType().?);
-                        try std.testing.expectEqual(c.CXType_Pointer, child_c_type_def.?.typedefType().?.kind());
+                        try std.testing.expectEqual(clang.TypeKind.Pointer, child_c_type_def.?.typedefType().?.kind());
                         const child_c_type_def_pointee_tag = TypeTag.fromType(child_c_type_def.?.typedefType().?.pointeeType().?);
                         try std.testing.expectEqual(.Function, child_c_type_def_pointee_tag);
 
@@ -979,7 +997,7 @@ test "basic method/function info" {
                     else => {},
                 }
             },
-            c.CXCursor_TypedefDecl => {
+            clang.CursorKind.TypedefDecl => {
                 const vi = DeclInfo.fromCur(child);
                 try std.testing.expectEqual(.Pointer, vi.ref_type);
                 const vi_pointee_tag = TypeTag.fromType(vi.ref_c_type.pointeeType().?);
@@ -1009,7 +1027,7 @@ test "struct/class type info" {
         cpp_file_path,
     );
     defer translation_unit.deinit();
-    try translation_unit.printDiags();
+    try translation_unit.printAndCheckDiags();
 
     var root_cursor = translation_unit.cursor();
 
@@ -1018,7 +1036,7 @@ test "struct/class type info" {
     try std.testing.expect(ns_childs.items.len > 0);
 
     for (ns_childs.items) |child| {
-        if (child.isInSystemHeader() or child.kind() != c.CXCursor_Namespace) continue;
+        if (child.isInSystemHeader() or child.kind() != clang.CursorKind.Namespace) continue;
         root_cursor = child;
         break;
     }
@@ -1384,7 +1402,7 @@ test "basic cursor manipulatons" {
         cpp_file_path,
     );
     defer translation_unit.deinit();
-    try translation_unit.printDiags();
+    try translation_unit.printAndCheckDiags();
 
     var root_cursor = translation_unit.cursor();
 
@@ -1393,7 +1411,7 @@ test "basic cursor manipulatons" {
     try std.testing.expect(ns_childs.items.len > 0);
 
     for (ns_childs.items) |child| {
-        if (child.isInSystemHeader() or child.kind() != c.CXCursor_Namespace) continue;
+        if (child.isInSystemHeader() or child.kind() != clang.CursorKind.Namespace) continue;
         root_cursor = child;
         break;
     }
@@ -1412,7 +1430,7 @@ test "basic cursor manipulatons" {
     for (childs.items) |child| {
         if (child.isInSystemHeader()) continue;
         switch (child.kind()) {
-            c.CXCursor_StructDecl => {
+            clang.CursorKind.StructDecl => {
                 comp_cases += 1;
                 switch (comp_cases) {
                     1 => {
@@ -1422,7 +1440,7 @@ test "basic cursor manipulatons" {
                     else => {},
                 }
             },
-            c.CXCursor_TypedefDecl => {
+            clang.CursorKind.TypedefDecl => {
                 typedef_cases += 1;
                 switch (typedef_cases) {
                     1 => {},
@@ -1433,7 +1451,7 @@ test "basic cursor manipulatons" {
                     else => {},
                 }
             },
-            c.CXCursor_VarDecl => {
+            clang.CursorKind.VarDecl => {
                 var_decl_cases += 1;
                 switch (var_decl_cases) {
                     1 => {
@@ -1445,7 +1463,7 @@ test "basic cursor manipulatons" {
                         try std.testing.expect(pointee_type != null);
 
                         const decl_cur = c_typeToCanonTypeDef(pointee_type.?);
-                        const is_not_decl = decl_cur.isInvalid() or decl_cur.kind() == c.CXCursor_NoDeclFound;
+                        const is_not_decl = decl_cur.isInvalid() or decl_cur.kind() == clang.CursorKind.NoDeclFound;
                         // `int` is a built-in type not any declaraton...
                         try std.testing.expect(is_not_decl);
 
@@ -1462,10 +1480,10 @@ test "basic cursor manipulatons" {
                         try std.testing.expect(pointee_type != null);
 
                         const decl_cur = c_typeToCanonTypeDef(pointee_type.?);
-                        const is_not_decl = decl_cur.isInvalid() or decl_cur.kind() == c.CXCursor_NoDeclFound;
+                        const is_not_decl = decl_cur.isInvalid() or decl_cur.kind() == clang.CursorKind.NoDeclFound;
                         // points to typedef declaration...
                         try std.testing.expect(!is_not_decl);
-                        try std.testing.expectEqual(c.CXCursor_TypedefDecl, decl_cur.kind());
+                        try std.testing.expectEqual(clang.CursorKind.TypedefDecl, decl_cur.kind());
 
                         const decl_spelling = try child.spelling(allocator);
                         defer allocator.free(decl_spelling);
@@ -1478,15 +1496,15 @@ test "basic cursor manipulatons" {
 
                         var pointee_type = c_type.pointeeType();
                         try std.testing.expect(pointee_type != null);
-                        try std.testing.expectEqual(c.CXType_Pointer, pointee_type.?.kind());
+                        try std.testing.expectEqual(clang.TypeKind.Pointer, pointee_type.?.kind());
 
                         // the `Type *`
                         pointee_type = pointee_type.?.pointeeType();
                         const decl_cur = c_typeToCanonTypeDef(pointee_type.?);
-                        const is_not_decl = decl_cur.isInvalid() or decl_cur.kind() == c.CXCursor_NoDeclFound;
+                        const is_not_decl = decl_cur.isInvalid() or decl_cur.kind() == clang.CursorKind.NoDeclFound;
                         // points to typedef declaration...
                         try std.testing.expect(!is_not_decl);
-                        try std.testing.expectEqual(c.CXCursor_TypedefDecl, decl_cur.kind());
+                        try std.testing.expectEqual(clang.CursorKind.TypedefDecl, decl_cur.kind());
                     },
                     else => {},
                 }

@@ -236,7 +236,7 @@ const BindgenInfo = struct {
         @panic("Can't handle TODO?");
     }
 
-    fn deinit(self: *Self) void {
+    fn deinit(self: Self) void {
         // translation_unit deinit?
 
         for (self.type_list.items) |ty| {
@@ -259,7 +259,7 @@ test "bindgen info parse" {
         cpp_file_path,
     );
     defer translation_unit.deinit();
-    try translation_unit.printDiags();
+    try translation_unit.printAndCheckDiags();
 
     var root_cursor = translation_unit.cursor();
 
@@ -275,10 +275,10 @@ test "bindgen info parse" {
     for (childs.items) |child| {
         if (child.isInSystemHeader()) continue;
         switch (child.kind()) {
-            c.CXCursor_StructDecl,
-            c.CXCursor_ClassDecl,
-            c.CXCursor_EnumDecl,
-            c.CXCursor_UnionDecl,
+            clang.CursorKind.StructDecl,
+            clang.CursorKind.ClassDecl,
+            clang.CursorKind.EnumDecl,
+            clang.CursorKind.UnionDecl,
             => {
                 const ty_id = try bindgen_info.getOrAddTyFromCur(child);
                 const ty = bindgen_info.getTy(ty_id).?;
@@ -402,8 +402,8 @@ test "bindgen info parse" {
                     else => {},
                 }
             },
-            c.CXCursor_TypedefDecl,
-            c.CXCursor_TypeAliasDecl,
+            clang.CursorKind.TypedefDecl,
+            clang.CursorKind.TypeAliasDecl,
             => {
                 typedef_cases += 1;
 
@@ -425,7 +425,7 @@ test "bindgen info parse" {
                         // typically if we really wanted to parse the Class Template Definition..
                         const visitor = struct {
                             fn func(ret: *clang.Cursor, current: clang.Cursor, _: clang.Cursor) !void {
-                                if (current.kind() == c.CXCursor_TemplateRef) {
+                                if (current.kind() == clang.CursorKind.TemplateRef) {
                                     ret.* = current;
                                     return error.ForcedBreak;
                                 }

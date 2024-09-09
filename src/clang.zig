@@ -1,10 +1,8 @@
 const std = @import("std");
 const sl = @import("source_logger.zig");
 
-pub const c = @cImport({
-    @cInclude("clang-c/Index.h");
-    @cInclude("stdio.h");
-});
+const clang_c = @import("clang-c/index.zig");
+pub const c = clang_c.c;
 
 const log = sl.scoped(.clang);
 
@@ -86,7 +84,7 @@ pub const CursorChildVisitError = error{
 
 fn C_CursorChildVisitorWrapper(
     comptime T: type,
-    comptime visitor: fn (*T, Cursor, Cursor) anyerror!void,
+    comptime visitor: fn (T, Cursor, Cursor) anyerror!void,
 ) type {
     return struct {
         fn c_func(
@@ -95,7 +93,11 @@ fn C_CursorChildVisitorWrapper(
             user_data: ?*anyopaque,
         ) callconv(.C) c.CXChildVisitResult {
             const data = user_data orelse @panic("Shouldn't receive null context!");
-            const context: *T = @ptrCast(@alignCast(data));
+            const T_type_info = @typeInfo(T);
+            const context: T = if (comptime T_type_info == .pointer)
+                @ptrCast(@alignCast(data))
+            else
+                @as(*T, @ptrCast(@alignCast(data))).*;
 
             visitor(
                 context,
@@ -123,7 +125,7 @@ fn C_CursorChildVisitorWrapper(
 
 fn ToCursorChildVisitorT(
     comptime T: type,
-    comptime visitor: fn (*T, Cursor, Cursor) anyerror!void,
+    comptime visitor: fn (T, Cursor, Cursor) anyerror!void,
 ) @TypeOf(C_CursorChildVisitorWrapper(T, visitor).c_func) {
     return C_CursorChildVisitorWrapper(T, visitor).c_func;
 }
@@ -161,14 +163,15 @@ pub const String = struct {
     }
 };
 
+pub const CursorKind = clang_c.CursorKind;
+
 pub const Cursor = struct {
     native: c.CXCursor,
 
     const Self = @This();
-    const KindType = @TypeOf(c.CXCursor_ClassDecl);
 
     pub fn isInvalid(self: Self) bool {
-        return self.isNull() or c.clang_isInvalid(@intCast(self.kind())) != 0;
+        return self.isNull() or clang_c.clang_isInvalid(self.kind()) != 0;
     }
 
     pub fn isNull(self: Self) bool {
@@ -176,7 +179,7 @@ pub const Cursor = struct {
     }
 
     pub fn isDeclaration(self: Self) bool {
-        return c.clang_isDeclaration(@intCast(self.kind())) != 0;
+        return clang_c.clang_isDeclaration(self.kind()) != 0;
     }
 
     pub fn isDefinition(self: Self) bool {
@@ -188,7 +191,7 @@ pub const Cursor = struct {
     }
 
     pub fn isReference(self: Self) bool {
-        return c.clang_isReference(@intCast(self.kind())) != 0;
+        return clang_c.clang_isReference(self.kind()) != 0;
     }
 
     pub fn isAnonymous(self: Self) bool {
@@ -240,7 +243,7 @@ pub const Cursor = struct {
     }
 
     pub fn isMethodOperator(self: Self) bool {
-        if (self.kind() != c.CXCursor_CXXMethod) return false;
+        if (self.kind() != CursorKind.CXXMethod) return false;
         if (c.clang_CXXMethod_isCopyAssignmentOperator(self.native) != 0) return true;
         if (c.clang_CXXMethod_isMoveAssignmentOperator(self.native) != 0) return true;
 
@@ -261,9 +264,9 @@ pub const Cursor = struct {
         var semantic_parent = self.fallibleSemanticParent();
 
         while (semantic_parent != null and
-            (semantic_parent.?.kind() == c.CXCursor_Namespace or
-            semantic_parent.?.kind() == c.CXCursor_NamespaceAlias or
-            semantic_parent.?.kind() == c.CXCursor_NamespaceRef))
+            (semantic_parent.?.kind() == CursorKind.Namespace or
+            semantic_parent.?.kind() == CursorKind.NamespaceAlias or
+            semantic_parent.?.kind() == CursorKind.NamespaceRef))
         {
             semantic_parent = semantic_parent.?.fallibleSemanticParent();
         }
@@ -280,9 +283,9 @@ pub const Cursor = struct {
 
     pub fn isTemplateLike(self: Self) bool {
         return switch (self.kind()) {
-            c.CXCursor_ClassTemplate,
-            c.CXCursor_ClassTemplatePartialSpecialization,
-            c.CXCursor_TypeAliasTemplateDecl,
+            c.CursorKind.ClassTemplate,
+            c.CursorKind.ClassTemplatePartialSpecialization,
+            c.CursorKind.ypeAliasTemplateDecl,
             => true,
             else => false,
         };
@@ -303,12 +306,12 @@ pub const Cursor = struct {
         return c.clang_equalCursors(self.native, other.native) == 1;
     }
 
-    pub fn kind(self: Self) KindType {
-        return @intCast(c.clang_getCursorKind(self.native));
+    pub fn kind(self: Self) CursorKind {
+        return clang_c.clang_getCursorKind(self.native);
     }
 
-    pub fn templateKind(self: Self) KindType {
-        return @intCast(c.clang_getTemplateCursorKind(self.native));
+    pub fn templateKind(self: Self) CursorKind {
+        return clang_c.clang_getTemplateCursorKind(self.native);
     }
 
     pub fn spellingRaw(self: Self) String {
@@ -348,7 +351,7 @@ pub const Cursor = struct {
     pub fn definition(self: Self) ?Self {
         const cursor = Self{ .native = c.clang_getCursorDefinition(self.native) };
 
-        return if (cursor.isInvalid() or cursor.kind() == c.CXCursor_NoDeclFound)
+        return if (cursor.isInvalid() or cursor.kind() == CursorKind.NoDeclFound)
             null
         else
             cursor;
@@ -383,14 +386,14 @@ pub const Cursor = struct {
     }
 
     pub fn enumValue(self: Self) ?i64 {
-        return if (self.kind() == c.CXCursor_EnumConstantDecl)
+        return if (self.kind() == CursorKind.EnumConstantDecl)
             @intCast(c.clang_getEnumConstantDeclValue(self.native))
         else
             null;
     }
 
     pub fn enumUnsignedValue(self: Self) ?u64 {
-        return if (self.kind() == c.CXCursor_EnumConstantDecl)
+        return if (self.kind() == CursorKind.EnumConstantDecl)
             @intCast(c.clang_getEnumConstantDeclUnsignedValue(self.native))
         else
             null;
@@ -435,27 +438,26 @@ pub const Cursor = struct {
 
     pub fn visit(
         self: Self,
-        comptime T: type,
-        comptime visitor: fn (*T, Self, Self) anyerror!void,
-        user_data: *T,
+        user_data: anytype,
+        comptime visitor: fn (@TypeOf(user_data), Self, Self) anyerror!void,
     ) bool {
+        // it's fine we will re-cast back to a pointer to a const type if the type was that
         return c.clang_visitChildren(
             self.native,
-            ToCursorChildVisitorT(T, visitor),
-            @as(*anyopaque, user_data),
+            ToCursorChildVisitorT(@TypeOf(user_data), visitor),
+            @as(*anyopaque, @constCast(if (comptime @typeInfo(@TypeOf(user_data)) == .pointer) user_data else &user_data)),
         ) == 0;
     }
 
-    const SelfArrayList = std.ArrayList(Self);
-    pub fn collectChildren(self: Self, allocator: std.mem.Allocator) !SelfArrayList {
-        var list = SelfArrayList.init(allocator);
+    pub fn collectChildren(self: Self, allocator: std.mem.Allocator) !std.ArrayList(Self) {
+        var list = std.ArrayList(Self).init(allocator);
         const collect_fn = struct {
-            fn func(ret_list: *SelfArrayList, current: Cursor, _: Cursor) !void {
+            fn func(ret_list: *std.ArrayList(Self), current: Cursor, _: Cursor) !void {
                 try ret_list.append(current);
             }
         }.func;
 
-        if (!self.visit(SelfArrayList, collect_fn, &list)) {
+        if (!self.visit(&list, collect_fn)) {
             return error.TraverseError;
         }
         return list;
@@ -490,14 +492,15 @@ pub fn CursorHashMap(comptime V: type) type {
     return std.HashMap(Cursor, V, CursorContext, std.hash_map.default_max_load_percentage);
 }
 
+pub const TypeKind = clang_c.TypeKind;
+
 pub const Type = struct {
     native: c.CXType,
 
-    const KindType = @TypeOf(c.CXType_Record);
     const Self = @This();
 
     pub fn isInvalid(self: Self) bool {
-        return self.kind() == c.CXType_Invalid;
+        return self.kind() == TypeKind.Invalid;
     }
 
     pub fn isConst(self: Self) bool {
@@ -506,13 +509,13 @@ pub const Type = struct {
 
     pub fn isROrLValueRef(self: Self) bool {
         return switch (self.kind()) {
-            c.CXType_RValueReference, c.CXType_LValueReference => true,
+            TypeKind.RValueReference, TypeKind.LValueReference => true,
             else => false,
         };
     }
 
     pub fn isNonDeducibleAutoType(self: Self) bool {
-        std.debug.assert(self.kind() == c.CXType_Auto);
+        std.debug.assert(self.kind() == TypeKind.Auto);
         return self.canonicalType().equal(self);
     }
 
@@ -520,8 +523,8 @@ pub const Type = struct {
         return c.clang_equalTypes(self.native, other.native) != 0;
     }
 
-    pub fn kind(self: Self) KindType {
-        return @intCast(self.native.kind);
+    pub fn kind(self: Self) TypeKind {
+        return @enumFromInt(self.native.kind);
     }
 
     pub fn spellingFull(self: Self, allocator: std.mem.Allocator) ![]const u8 {
@@ -554,12 +557,12 @@ pub const Type = struct {
 
     pub fn pointeeType(self: Self) ?Self {
         switch (self.kind()) {
-            c.CXType_Pointer,
-            c.CXType_RValueReference,
-            c.CXType_LValueReference,
-            c.CXType_MemberPointer,
-            c.CXType_BlockPointer,
-            c.CXType_ObjCObjectPointer,
+            TypeKind.Pointer,
+            TypeKind.RValueReference,
+            TypeKind.LValueReference,
+            TypeKind.MemberPointer,
+            TypeKind.BlockPointer,
+            TypeKind.ObjCObjectPointer,
             => {
                 const inner = Self{ .native = c.clang_getPointeeType(self.native) };
 
@@ -626,7 +629,7 @@ pub const Type = struct {
         }
 
         const cur_canonical = cur_decleration.canonical();
-        if (!cur_canonical.isInvalid() and cur_canonical.kind() != c.CXCursor_NoDeclFound) {
+        if (!cur_canonical.isInvalid() and cur_canonical.kind() != CursorKind.NoDeclFound) {
             return cur_canonical;
         } else {
             return null;
@@ -637,7 +640,7 @@ pub const Type = struct {
 pub const TranslationUnitOptions = struct {
     args: [][*:0]const u8,
     unsaved_files: ?[]c.CXUnsavedFile = null,
-    record_detailed_preproessing: bool = true,
+    record_detailed_preproessing: bool = false,
     skip_function_bodies: bool = false,
     exclude_pch: bool = false,
     display_diag: bool = false,
@@ -715,7 +718,7 @@ pub const TranslationUnit = struct {
         };
     }
 
-    pub fn printDiags(self: Self) !void {
+    pub fn printAndCheckDiags(self: Self) !void {
         var err: c_int = 0;
         const num_diagnostics = c.clang_getNumDiagnostics(self.native);
         if (num_diagnostics > 0) {
@@ -728,9 +731,9 @@ pub const TranslationUnit = struct {
                     err = 1;
                 }
 
-                const @"struct" = c.clang_formatDiagnostic(diag, c.clang_defaultDiagnosticDisplayOptions());
-                std.debug.print("{s}\n", .{c.clang_getCString(@"struct")});
-                c.clang_disposeString(@"struct");
+                const diag_string = c.clang_formatDiagnostic(diag, c.clang_defaultDiagnosticDisplayOptions());
+                std.debug.print("{s}\n", .{c.clang_getCString(diag_string)});
+                c.clang_disposeString(diag_string);
             }
         }
 
@@ -747,16 +750,16 @@ pub const TranslationUnit = struct {
 
     fn clangTypeSize(self: Self, ty: Type) isize {
         return switch (ty.kind()) {
-            c.CXType_RValueReference, c.CXType_LValueReference => @intCast(self.pointer_width / 8),
-            c.CXType_Auto => if (ty.isNonDeducibleAutoType()) -6 else ty.c_size(),
+            TypeKind.RValueReference, TypeKind.LValueReference => @intCast(self.pointer_width / 8),
+            TypeKind.Auto => if (ty.isNonDeducibleAutoType()) -6 else ty.c_size(),
             else => ty.c_size(),
         };
     }
 
     fn clangTypeAlign(self: Self, ty: Type) isize {
         return switch (ty.kind()) {
-            c.CXType_RValueReference, c.CXType_LValueReference => @intCast(self.pointer_width / 8),
-            c.CXType_Auto => if (ty.isNonDeducibleAutoType()) -6 else ty.c_align(),
+            TypeKind.RValueReference, TypeKind.LValueReference => @intCast(self.pointer_width / 8),
+            TypeKind.Auto => if (ty.isNonDeducibleAutoType()) -6 else ty.c_align(),
             else => ty.c_align(),
         };
     }
@@ -778,7 +781,7 @@ pub const TranslationUnit = struct {
         return copyCXStringAndDispose(allocator, c.clang_TargetInfo_getTriple(ti));
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: Self) void {
         c.clang_disposeTranslationUnit(self.native);
         if (self.index) |idx| {
             c.clang_disposeIndex(idx);

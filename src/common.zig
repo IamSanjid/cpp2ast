@@ -72,7 +72,7 @@ pub const BasicString = struct {
         return self.buffer.allocator;
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: Self) void {
         self.buffer.deinit();
     }
 };
