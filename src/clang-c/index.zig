@@ -455,6 +455,16 @@ pub const TypeKind = enum(c_uint) {
 pub inline fn clang_getTypeKindSpelling(K: TypeKind) c.CXString {
     return c.clang_getTypeKindSpelling(@intFromEnum(K));
 }
+pub const CXXAccessSpecifier = enum(c_uint) {
+    InvalidAccessSpecifier = 0,
+    Public = 1,
+    Protected = 2,
+    Private = 3,
+    pub const TagType = c_uint;
+};
+pub inline fn clang_getCXXAccessSpecifier(arg0: c.CXCursor) CXXAccessSpecifier {
+    return @enumFromInt(c.clang_getCXXAccessSpecifier(arg0));
+}
 pub inline fn clang_getTemplateCursorKind(C: c.CXCursor) CursorKind {
     return @enumFromInt(c.clang_getTemplateCursorKind(C));
 }

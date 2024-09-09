@@ -75,17 +75,27 @@ pub fn bindings(allocator: std.mem.Allocator, header_path: []const u8) !BasicStr
     return gen_builder;
 }
 
+const ToZigEnum = struct {
+    name: []const u8,
+    variant_trim_left: []const u8 = "",
+};
+const interested_cursor_spelling = std.StaticStringMap(ToZigEnum).initComptime(&.{
+    .{ "CXCursorKind", .{ .name = "CursorKind" } },
+    .{ "CXTypeKind", .{ .name = "TypeKind" } },
+    .{ "CX_CXXAccessSpecifier", .{ .name = "CXXAccessSpecifier", .variant_trim_left = "CX" } },
+});
+
 const isCursorInteresting = struct {
-    fn func(cur: clang.Cursor, space_creator: std.mem.Allocator, ret_spelling: ?*[]const u8) bool {
+    fn func(cur: clang.Cursor, space_creator: std.mem.Allocator, to_enum_zig: ?*ToZigEnum) bool {
         const cur_spelling = cur.spelling(space_creator) catch return false;
-        const result = std.mem.eql(u8, "CXCursorKind", cur_spelling) or
-            std.mem.eql(u8, "CXTypeKind", cur_spelling);
-        if (ret_spelling) |spelling| {
-            spelling.* = cur_spelling;
-        } else {
-            space_creator.free(cur_spelling);
+        defer space_creator.free(cur_spelling);
+        if (interested_cursor_spelling.get(cur_spelling)) |tez| {
+            if (to_enum_zig) |ret| {
+                ret.* = tez;
+            }
+            return true;
         }
-        return result;
+        return false;
     }
 }.func;
 
@@ -95,10 +105,8 @@ fn generateEnumBindings(cursor: clang.Cursor, allocator: std.mem.Allocator, gen_
     const enum_ty = try t.EnumType.fromType(allocator, c_type);
     defer enum_ty.deinit();
 
-    var cur_spelling: []const u8 = undefined;
-    defer allocator.free(cur_spelling);
-
-    if (!isCursorInteresting(enum_ty.cursor, allocator, &cur_spelling)) return;
+    var to_zig_enum: ToZigEnum = undefined;
+    if (!isCursorInteresting(enum_ty.cursor, allocator, &to_zig_enum)) return;
 
     const tag_type_str = switch (enum_ty.tag_type) {
         .Bool, .Int => "c_int",
@@ -114,8 +122,7 @@ fn generateEnumBindings(cursor: clang.Cursor, allocator: std.mem.Allocator, gen_
         }
         decl_variants.deinit();
     }
-    // skipping `CX` of the start
-    const enum_name = cur_spelling[2..];
+    const enum_name = to_zig_enum.name;
     try gen_builder.appendFmt("pub const {s} = enum({s}) {{\n", .{ enum_name, tag_type_str });
     for (enum_ty.variants.items) |variant| {
         const variant_spelling = try variant[0].spelling(allocator);
@@ -123,6 +130,9 @@ fn generateEnumBindings(cursor: clang.Cursor, allocator: std.mem.Allocator, gen_
         var variant_name = variant_spelling;
         if (std.mem.indexOf(u8, variant_name, "_")) |pos| {
             variant_name = variant_name[pos + 1 ..];
+        }
+        if (to_zig_enum.variant_trim_left.len > 0) {
+            variant_name = std.mem.trimLeft(u8, variant_name, to_zig_enum.variant_trim_left);
         }
         const variant_name_starts_first = std.mem.startsWith(u8, variant_name, "First");
         const variant_name_starts_last = std.mem.startsWith(u8, variant_name, "Last");
@@ -175,12 +185,10 @@ const toCTypeStr = struct {
             else => blk: {
                 // arena allocator is probably best for such cases...
                 if (t.c_typeToCanonTypeDefFallible(c_type)) |cur| {
-                    var cur_spelling: []const u8 = undefined;
-                    defer space_creator.free(cur_spelling);
-                    if (isCursorInteresting(cur, space_creator, &cur_spelling)) {
-                        // skipping `CX`
+                    var tez: ToZigEnum = undefined;
+                    if (isCursorInteresting(cur, space_creator, &tez)) {
                         wrap_type.* = true;
-                        break :blk space_creator.dupe(u8, cur_spelling[2..]);
+                        break :blk space_creator.dupe(u8, tez.name);
                     }
                 }
                 const type_spelling = @constCast(try c_type.spelling(space_creator));

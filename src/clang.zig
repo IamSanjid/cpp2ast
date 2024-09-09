@@ -164,6 +164,7 @@ pub const String = struct {
 };
 
 pub const CursorKind = clang_c.CursorKind;
+pub const CXXAccessSpecifier = clang_c.CXXAccessSpecifier;
 
 pub const Cursor = struct {
     native: c.CXCursor,
@@ -243,7 +244,7 @@ pub const Cursor = struct {
     }
 
     pub fn isMethodOperator(self: Self) bool {
-        if (self.kind() != CursorKind.CXXMethod) return false;
+        if (self.kind() != .CXXMethod) return false;
         if (c.clang_CXXMethod_isCopyAssignmentOperator(self.native) != 0) return true;
         if (c.clang_CXXMethod_isMoveAssignmentOperator(self.native) != 0) return true;
 
@@ -264,9 +265,9 @@ pub const Cursor = struct {
         var semantic_parent = self.fallibleSemanticParent();
 
         while (semantic_parent != null and
-            (semantic_parent.?.kind() == CursorKind.Namespace or
-            semantic_parent.?.kind() == CursorKind.NamespaceAlias or
-            semantic_parent.?.kind() == CursorKind.NamespaceRef))
+            (semantic_parent.?.kind() == .Namespace or
+            semantic_parent.?.kind() == .NamespaceAlias or
+            semantic_parent.?.kind() == .NamespaceRef))
         {
             semantic_parent = semantic_parent.?.fallibleSemanticParent();
         }
@@ -283,9 +284,9 @@ pub const Cursor = struct {
 
     pub fn isTemplateLike(self: Self) bool {
         return switch (self.kind()) {
-            c.CursorKind.ClassTemplate,
-            c.CursorKind.ClassTemplatePartialSpecialization,
-            c.CursorKind.ypeAliasTemplateDecl,
+            .ClassTemplate,
+            .ClassTemplatePartialSpecialization,
+            .ypeAliasTemplateDecl,
             => true,
             else => false,
         };
@@ -293,8 +294,7 @@ pub const Cursor = struct {
 
     pub fn isPubliclyAccessible(self: Self) bool {
         const accessible = self.accessSpecifier();
-        return accessible == c.CX_CXXPublic or
-            accessible == c.CX_CXXInvalidAccessSpecifier;
+        return accessible == .Public or accessible == .InvalidAccessSpecifier;
     }
 
     pub fn translationUnit(self: Self) TranslationUnit {
@@ -351,7 +351,7 @@ pub const Cursor = struct {
     pub fn definition(self: Self) ?Self {
         const cursor = Self{ .native = c.clang_getCursorDefinition(self.native) };
 
-        return if (cursor.isInvalid() or cursor.kind() == CursorKind.NoDeclFound)
+        return if (cursor.isInvalid() or cursor.kind() == .NoDeclFound)
             null
         else
             cursor;
@@ -386,21 +386,21 @@ pub const Cursor = struct {
     }
 
     pub fn enumValue(self: Self) ?i64 {
-        return if (self.kind() == CursorKind.EnumConstantDecl)
+        return if (self.kind() == .EnumConstantDecl)
             @intCast(c.clang_getEnumConstantDeclValue(self.native))
         else
             null;
     }
 
     pub fn enumUnsignedValue(self: Self) ?u64 {
-        return if (self.kind() == CursorKind.EnumConstantDecl)
+        return if (self.kind() == .EnumConstantDecl)
             @intCast(c.clang_getEnumConstantDeclUnsignedValue(self.native))
         else
             null;
     }
 
-    pub fn accessSpecifier(self: Self) c.CX_CXXAccessSpecifier {
-        return c.clang_getCXXAccessSpecifier(self.native);
+    pub fn accessSpecifier(self: Self) CXXAccessSpecifier {
+        return clang_c.clang_getCXXAccessSpecifier(self.native);
     }
 
     pub fn hash(self: Self) c_uint {
@@ -500,7 +500,7 @@ pub const Type = struct {
     const Self = @This();
 
     pub fn isInvalid(self: Self) bool {
-        return self.kind() == TypeKind.Invalid;
+        return self.kind() == .Invalid;
     }
 
     pub fn isConst(self: Self) bool {
@@ -509,13 +509,13 @@ pub const Type = struct {
 
     pub fn isROrLValueRef(self: Self) bool {
         return switch (self.kind()) {
-            TypeKind.RValueReference, TypeKind.LValueReference => true,
+            .RValueReference, .LValueReference => true,
             else => false,
         };
     }
 
     pub fn isNonDeducibleAutoType(self: Self) bool {
-        std.debug.assert(self.kind() == TypeKind.Auto);
+        std.debug.assert(self.kind() == .Auto);
         return self.canonicalType().equal(self);
     }
 
@@ -557,12 +557,12 @@ pub const Type = struct {
 
     pub fn pointeeType(self: Self) ?Self {
         switch (self.kind()) {
-            TypeKind.Pointer,
-            TypeKind.RValueReference,
-            TypeKind.LValueReference,
-            TypeKind.MemberPointer,
-            TypeKind.BlockPointer,
-            TypeKind.ObjCObjectPointer,
+            .Pointer,
+            .RValueReference,
+            .LValueReference,
+            .MemberPointer,
+            .BlockPointer,
+            .ObjCObjectPointer,
             => {
                 const inner = Self{ .native = c.clang_getPointeeType(self.native) };
 
@@ -629,7 +629,7 @@ pub const Type = struct {
         }
 
         const cur_canonical = cur_decleration.canonical();
-        if (!cur_canonical.isInvalid() and cur_canonical.kind() != CursorKind.NoDeclFound) {
+        if (!cur_canonical.isInvalid() and cur_canonical.kind() != .NoDeclFound) {
             return cur_canonical;
         } else {
             return null;
@@ -750,16 +750,16 @@ pub const TranslationUnit = struct {
 
     fn clangTypeSize(self: Self, ty: Type) isize {
         return switch (ty.kind()) {
-            TypeKind.RValueReference, TypeKind.LValueReference => @intCast(self.pointer_width / 8),
-            TypeKind.Auto => if (ty.isNonDeducibleAutoType()) -6 else ty.c_size(),
+            .RValueReference, .LValueReference => @intCast(self.pointer_width / 8),
+            .Auto => if (ty.isNonDeducibleAutoType()) -6 else ty.c_size(),
             else => ty.c_size(),
         };
     }
 
     fn clangTypeAlign(self: Self, ty: Type) isize {
         return switch (ty.kind()) {
-            TypeKind.RValueReference, TypeKind.LValueReference => @intCast(self.pointer_width / 8),
-            TypeKind.Auto => if (ty.isNonDeducibleAutoType()) -6 else ty.c_align(),
+            .RValueReference, .LValueReference => @intCast(self.pointer_width / 8),
+            .Auto => if (ty.isNonDeducibleAutoType()) -6 else ty.c_align(),
             else => ty.c_align(),
         };
     }
