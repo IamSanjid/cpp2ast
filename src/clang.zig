@@ -378,6 +378,10 @@ pub const Cursor = struct {
         return if (width == -1) null else @intCast(width);
     }
 
+    pub fn c_offset(self: Self) isize {
+        return @intCast(c.clang_Cursor_getOffsetOfField(self.native));
+    }
+
     pub fn spellingRaw(self: Self) String {
         return String{ .native = c.clang_getCursorSpelling(self.native) };
     }
