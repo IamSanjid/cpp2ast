@@ -1,7 +1,51 @@
-pub const c = @cImport({
-    @cInclude("clang-c/Index.h");
-    @cInclude("stdio.h");
-});
+pub const IndexOptions = struct {
+    pub const Size: usize = 24;
+    pub const Align: usize = 8;
+    const Native = extern struct { __opaque: [Size]u8 align(Align) = @import("std").mem.zeroes([Size]u8) };
+    ThreadBackgroundPriorityForIndexing: u8 = 0,
+    ThreadBackgroundPriorityForEditing: u8 = 0,
+    ExcludeDeclarationsFromPCH: bool = false,
+    DisplayDiagnostics: bool = false,
+    StorePreamblesInMemory: bool = false,
+    PreambleStoragePath: [*c]u8 = @import("std").mem.zeroes([*c]u8),
+    InvocationEmissionPath: [*c]u8 = @import("std").mem.zeroes([*c]u8),
+    pub fn native(self: @This()) Native {
+        var x = Native{};
+        set_Size(&x, @This().Size);
+        set_ThreadBackgroundPriorityForIndexing(&x, self.ThreadBackgroundPriorityForIndexing);
+        set_ThreadBackgroundPriorityForEditing(&x, self.ThreadBackgroundPriorityForEditing);
+        set_ExcludeDeclarationsFromPCH(&x, self.ExcludeDeclarationsFromPCH);
+        set_DisplayDiagnostics(&x, self.DisplayDiagnostics);
+        set_StorePreamblesInMemory(&x, self.StorePreamblesInMemory);
+        set_PreambleStoragePath(&x, self.PreambleStoragePath);
+        set_InvocationEmissionPath(&x, self.InvocationEmissionPath);
+        return x;
+    }
+    inline fn set_Size(x: *Native, value: c_uint) void {
+        return c.CXIndexOptions_set_Size(@as(*anyopaque, x), value);
+    }
+    inline fn set_ThreadBackgroundPriorityForIndexing(x: *Native, value: u8) void {
+        return c.CXIndexOptions_set_ThreadBackgroundPriorityForIndexing(@as(*anyopaque, x), value);
+    }
+    inline fn set_ThreadBackgroundPriorityForEditing(x: *Native, value: u8) void {
+        return c.CXIndexOptions_set_ThreadBackgroundPriorityForEditing(@as(*anyopaque, x), value);
+    }
+    inline fn set_ExcludeDeclarationsFromPCH(x: *Native, value: bool) void {
+        return c.CXIndexOptions_set_ExcludeDeclarationsFromPCH(@as(*anyopaque, x), @intFromBool(value));
+    }
+    inline fn set_DisplayDiagnostics(x: *Native, value: bool) void {
+        return c.CXIndexOptions_set_DisplayDiagnostics(@as(*anyopaque, x), @intFromBool(value));
+    }
+    inline fn set_StorePreamblesInMemory(x: *Native, value: bool) void {
+        return c.CXIndexOptions_set_StorePreamblesInMemory(@as(*anyopaque, x), @intFromBool(value));
+    }
+    inline fn set_PreambleStoragePath(x: *Native, value: [*c]u8) void {
+        return c.CXIndexOptions_set_PreambleStoragePath(@as(*anyopaque, x), value);
+    }
+    inline fn set_InvocationEmissionPath(x: *Native, value: [*c]u8) void {
+        return c.CXIndexOptions_set_InvocationEmissionPath(@as(*anyopaque, x), value);
+    }
+};
 pub const CursorKind = enum(c_uint) {
     UnexposedDecl = 1,
     StructDecl = 2,
@@ -474,3 +518,10 @@ pub inline fn clang_getCursorKindSpelling(Kind: CursorKind) c.CXString {
 pub inline fn clang_codeCompleteGetContainerKind(Results: [*c]c.CXCodeCompleteResults, IsIncomplete: [*c]c_uint) CursorKind {
     return @enumFromInt(c.clang_codeCompleteGetContainerKind(Results, IsIncomplete));
 }
+pub const c = @cImport({
+    @cInclude("clang-c/Index.h");
+    @cInclude("stdio.h");
+    @cDefine("GLUE_CAST", {});
+    @cInclude("glue.h");
+    @cUndef("GLUE_CAST");
+});

@@ -292,9 +292,49 @@ pub const Cursor = struct {
         };
     }
 
+    pub fn isTemplateParameter(self: Self) bool {
+        return switch (self.kind()) {
+            .TemplateTemplateParameter,
+            .TemplateTypeParameter,
+            .NonTypeTemplateParameter,
+            => true,
+            else => false,
+        };
+    }
+
+    pub fn isDependentOnTemplateParameter(self: Self) bool {
+        const visitor = struct {
+            fn func(found_template: *bool, current: Self, _: Self) !void {
+                if (current.isTemplateParameter()) {
+                    found_template.* = true;
+                    return error.ForcedBreak;
+                }
+                if (current.referenced()) |ref| {
+                    if (ref.isTemplateParameter()) {
+                        found_template.* = true;
+                        return error.ForcedBreak;
+                    }
+                    _ = ref.visit(found_template, @This().func);
+                    if (found_template.*) return error.ForcedBreak;
+                }
+                return error.ContinueAsRecurse;
+            }
+        }.func;
+
+        if (self.isTemplateParameter()) return true;
+
+        var found_template = false;
+        _ = self.visit(&found_template, visitor);
+        return found_template;
+    }
+
     pub fn isPubliclyAccessible(self: Self) bool {
         const accessible = self.accessSpecifier();
         return accessible == .Public or accessible == .InvalidAccessSpecifier;
+    }
+
+    pub fn isBitField(self: Self) bool {
+        return c.clang_Cursor_isBitField(self.native) != 0;
     }
 
     pub fn translationUnit(self: Self) TranslationUnit {
@@ -312,6 +352,30 @@ pub const Cursor = struct {
 
     pub fn templateKind(self: Self) CursorKind {
         return clang_c.clang_getTemplateCursorKind(self.native);
+    }
+
+    pub fn bitWidthExpr(self: Self) ?Self {
+        if (!self.isBitField()) return null;
+
+        var result: ?Self = null;
+        const visitor = struct {
+            fn func(return_value: *?Self, current: Self, _: Self) !void {
+                if (current.kind() == .TypeRef) {
+                    return;
+                }
+
+                return_value.* = current;
+                return error.ForcedBreak;
+            }
+        }.func;
+        _ = self.visit(&result, visitor);
+        return result;
+    }
+
+    pub fn bitWidth(self: Self) ?usize {
+        if (self.bitWidthExpr().?.isDependentOnTemplateParameter()) return null;
+        const width = c.clang_getFieldDeclBitWidth(self.native);
+        return if (width == -1) null else @intCast(width);
     }
 
     pub fn spellingRaw(self: Self) String {
@@ -637,23 +701,43 @@ pub const Type = struct {
     }
 };
 
+pub const IndexOptions = clang_c.IndexOptions;
+
+pub const Index = struct {
+    native: c.CXIndex,
+
+    const Self = @This();
+
+    pub fn create(exclude_pch: bool, display_diag: bool) Self {
+        return Self{
+            .native = c.clang_createIndex(
+                @intFromBool(exclude_pch),
+                @intFromBool(display_diag),
+            ),
+        };
+    }
+
+    pub fn createWithOptions(options: IndexOptions) Self {
+        return Self{
+            .native = c.clang_createIndexWithOptions(
+                c.CXIndexOptions_castAsPtr(@as(*anyopaque, @constCast(&options.native()))),
+            ),
+        };
+    }
+
+    pub fn deinit(self: Self) void {
+        c.clang_disposeIndex(self.native);
+    }
+};
+
 pub const TranslationUnitOptions = struct {
     args: [][*:0]const u8,
     unsaved_files: ?[]c.CXUnsavedFile = null,
     record_detailed_preproessing: bool = false,
     skip_function_bodies: bool = false,
-    exclude_pch: bool = false,
-    display_diag: bool = false,
-    // TODO: add more options related to how the parsing goes, CXIndexOptions,
+    index_options: IndexOptions = .{},
 
     const Self = @This();
-
-    fn createCXIndex(self: Self) c.CXIndex {
-        return c.clang_createIndex(
-            @intFromBool(self.exclude_pch),
-            @intFromBool(self.display_diag),
-        );
-    }
 
     fn parseOptions(self: Self) c_uint {
         var parse_options: c_uint = 0;
@@ -680,20 +764,19 @@ pub const TranslationUnitOptions = struct {
 };
 
 pub const TranslationUnit = struct {
-    index: ?c.CXIndex,
+    index: ?Index,
     native: c.CXTranslationUnit,
     pointer_width: usize,
 
     const Self = @This();
-    // TODO: Options?
     pub fn parse(opt: TranslationUnitOptions) !Self {
-        const index = opt.createCXIndex();
+        const index = Index.createWithOptions(opt.index_options);
 
         const unsaved_files = opt.unsavedFilesData();
 
         var translation_unit: c.CXTranslationUnit = undefined;
         try checkRetWithMsg(c.clang_parseTranslationUnit2(
-            index,
+            index.native,
             null,
             opt.args.ptr,
             @intCast(opt.args.len),
@@ -706,7 +789,7 @@ pub const TranslationUnit = struct {
         return init_with_native(translation_unit, index);
     }
 
-    fn init_with_native(translation_unit: c.CXTranslationUnit, idx: ?c.CXIndex) Self {
+    fn init_with_native(translation_unit: c.CXTranslationUnit, idx: ?Index) Self {
         const ti = c.clang_getTranslationUnitTargetInfo(translation_unit);
         defer c.clang_TargetInfo_dispose(ti);
         const pointer_width = c.clang_TargetInfo_getPointerWidth(ti);
@@ -784,7 +867,7 @@ pub const TranslationUnit = struct {
     pub fn deinit(self: Self) void {
         c.clang_disposeTranslationUnit(self.native);
         if (self.index) |idx| {
-            c.clang_disposeIndex(idx);
+            idx.deinit();
         }
     }
 };

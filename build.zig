@@ -65,20 +65,20 @@ fn buildModule(build_context: BuildContext) !void {
         .target = build_context.options.target,
         .optimize = build_context.options.optimize,
     });
-    if (build_context.getClangIncludeDir()) |dir| {
-        lib.addIncludePath(dir);
-    }
     try linkLibClangToCompileStep(lib, build_context);
     b.installArtifact(lib);
-
-    try b.modules.put(PACKAGE_NAME, &lib.root_module);
-
     installLibClangDlls(b, build_context.options);
+
+    const module = b.addModule(PACKAGE_NAME, .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = build_context.options.target,
+        .optimize = build_context.options.optimize,
+    });
+    try linkLibClangToModule(module, build_context);
 }
 
 fn buildTests(build_context: BuildContext) !void {
     const b = build_context.b;
-    const target = build_context.options.target.result;
     const test_step = b.step("test", "Run all the avilable tests.");
 
     const test_comp = b.addTest(.{
@@ -86,19 +86,7 @@ fn buildTests(build_context: BuildContext) !void {
         .target = build_context.options.target,
         .optimize = build_context.options.optimize,
     });
-    test_comp.root_module.addImport(PACKAGE_NAME, b.modules.get(PACKAGE_NAME).?);
-    // If you're linking libclang statically(libclang might be "static" but still
-    // need to link with windows's msvc runtime), it might not work the intended way,
-    // your final executable's linkage might need to be set as `.dynamic`.
-    // https://github.com/ziglang/zig/issues/21292#issuecomment-2326787384
-    if (target.os.tag == .windows and target.abi == .msvc) {
-        test_comp.linkage = .dynamic;
-    }
-    // for running tests...
-    try addCCXXIncludes(&test_comp.root_module);
-    if (build_context.getClangIncludeDir()) |dir| {
-        test_comp.addIncludePath(dir);
-    }
+    try linkLibClangToCompileStep(test_comp, build_context);
 
     const run_tests = b.addRunArtifact(test_comp);
     test_step.dependOn(&run_tests.step);
@@ -503,10 +491,11 @@ const LinkingLibClangInfo = struct {
     }
 };
 
-fn linkLibClangToCompileStep(exe: *std.Build.Step.Compile, build_context: BuildContext) !void {
+fn linkLibClangToModule(module: *std.Build.Module, build_context: BuildContext) !void {
+    const b = module.owner;
     const target = build_context.options.target;
 
-    try addCCXXIncludes(&exe.root_module);
+    try addCCXXIncludes(module);
 
     const exclude_files: ?[]const []const u8 = &.{
         "libMLIRMlirOptMain.a",
@@ -515,22 +504,28 @@ fn linkLibClangToCompileStep(exe: *std.Build.Step.Compile, build_context: BuildC
         "LLVMPolly.so",
     };
 
-    exe.linkLibC();
+    module.link_libc = true;
 
     var static_libclang = false;
     if (absolutePathToLazyPath(build_context.options.libclang_libs_dir)) |lib_path| {
-        exe.addLibraryPath(lib_path);
+        module.addLibraryPath(lib_path);
     }
+
+    if (build_context.getClangIncludeDir()) |dir| {
+        module.addIncludePath(dir);
+    }
+    module.addIncludePath(b.path("src/clang-c/"));
+    module.addCSourceFile(.{ .file = b.path("src/clang-c/glue.c") });
 
     if (target.result.os.tag.isDarwin()) {
         // adding some homebrew and macport lib paths, we are adding these before trying to find libclang.so
-        exe.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
-        exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-        exe.addLibraryPath(.{ .cwd_relative = "/opt/local/lib" });
+        module.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+        module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+        module.addLibraryPath(.{ .cwd_relative = "/opt/local/lib" });
     }
 
     const native_paths = build_context.native_paths;
-    if (LinkingLibClangInfo.from(&exe.root_module, native_paths)) |libclang_info| {
+    if (LinkingLibClangInfo.from(module, native_paths)) |libclang_info| {
         static_libclang = libclang_info.guessed_linkage != .dynamic;
         if (libclang_info.version) |ver| {
             if (!static_libclang) {
@@ -543,10 +538,10 @@ fn linkLibClangToCompileStep(exe: *std.Build.Step.Compile, build_context: BuildC
             }
         }
         if (libclang_info.is_found_in_system and !static_libclang) {
-            exe.addObjectFile(libclang_info.path);
+            module.addObjectFile(libclang_info.path);
         } else {
             try ext.linkAllLibsOf(
-                &exe.root_module,
+                module,
                 libclang_info.path.dirname(),
                 static_libclang,
                 build_context.options.read_symlink,
@@ -554,7 +549,7 @@ fn linkLibClangToCompileStep(exe: *std.Build.Step.Compile, build_context: BuildC
             );
         }
     } else {
-        exe.linkSystemLibrary("clang");
+        module.linkSystemLibrary("clang", .{});
     }
 
     if (!build_context.options.use_zig_libcxx) {
@@ -573,33 +568,33 @@ fn linkLibClangToCompileStep(exe: *std.Build.Step.Compile, build_context: BuildC
         var found_atleast_one = false;
         for (libstdcxx_dyn_names) |libstdcxx_name| {
             const libstdcxx_path = ext.getObjSystemPath(native_paths, libstdcxx_name) catch continue;
-            exe.addObjectFile(.{ .cwd_relative = libstdcxx_path });
+            module.addObjectFile(.{ .cwd_relative = libstdcxx_path });
             found_atleast_one = true;
         }
         // just try everything and finger crossed...
         if (!found_atleast_one) {
             for (libstdcxx_static_names) |libstdcxx_name| {
                 const libstdcxx_path = ext.getObjSystemPath(native_paths, libstdcxx_name) catch continue;
-                exe.addObjectFile(.{ .cwd_relative = libstdcxx_path });
+                module.addObjectFile(.{ .cwd_relative = libstdcxx_path });
                 found_atleast_one = true;
             }
         }
 
         if (found_atleast_one) {
             if (target.result.os.tag == .linux) {
-                exe.linkSystemLibrary("unwind");
+                module.linkSystemLibrary("unwind", .{});
             }
         } else {
-            exe.linkLibCpp();
+            module.link_libcpp = true;
         }
     } else {
         switch (target.result.os.tag) {
             .windows => {
                 if (target.result.abi != .msvc) {
-                    exe.linkLibCpp();
+                    module.link_libcpp = true;
                 }
             },
-            else => exe.linkLibCpp(),
+            else => module.link_libcpp = true,
         }
     }
 
@@ -608,21 +603,35 @@ fn linkLibClangToCompileStep(exe: *std.Build.Step.Compile, build_context: BuildC
             // `getNativePaths` will actually find <Visual Studio Place>/Tools/LLVM/*
             if (build_context.options.libclang_libs_dir.len == 0) {
                 for (native_paths.lib_dirs.items) |lib_dir| {
-                    exe.addLibraryPath(.{ .cwd_relative = lib_dir });
+                    module.addLibraryPath(.{ .cwd_relative = lib_dir });
                 }
             }
-            exe.root_module.link_libcpp = false;
+            module.link_libcpp = false;
         }
-        exe.linkSystemLibrary("Winmm");
-        exe.linkSystemLibrary("Version");
-        exe.linkSystemLibrary("Ws2_32");
-        exe.linkSystemLibrary("advapi32");
-        exe.linkSystemLibrary("uuid");
-        exe.linkSystemLibrary("ole32");
+        module.linkSystemLibrary("Winmm", .{});
+        module.linkSystemLibrary("Version", .{});
+        module.linkSystemLibrary("Ws2_32", .{});
+        module.linkSystemLibrary("advapi32", .{});
+        module.linkSystemLibrary("uuid", .{});
+        module.linkSystemLibrary("ole32", .{});
+    }
+}
 
+fn linkLibClangToCompileStep(exe: *std.Build.Step.Compile, build_context: BuildContext) !void {
+    const target = build_context.options.target;
+    try linkLibClangToModule(&exe.root_module, build_context);
+    if (target.result.os.tag == .windows) {
         if (target.result.abi == .gnu) {
             // https://github.com/ziglang/zig/blob/28383d4d985cd04c897f6b6a63bd2107d8e2a8e9/build.zig#L216
             exe.want_lto = false;
+        }
+
+        // If you're linking libclang statically(libclang might be "static" but still
+        // need to link with windows's msvc runtime), it might not work the intended way,
+        // your final executable's linkage might need to be set as `.dynamic`.
+        // https://github.com/ziglang/zig/issues/21292#issuecomment-2326787384
+        if (target.result.abi == .msvc) {
+            exe.linkage = .dynamic;
         }
     }
 }
