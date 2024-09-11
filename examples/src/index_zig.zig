@@ -5,6 +5,7 @@ const cpp2ast = @import("cpp2ast");
 const ToZig = index_common.ToZig;
 const isCursorInteresting = index_common.isCursorInteresting;
 const toZigTypeStr = index_common.toZigTypeStr;
+const toCTypeStr = index_common.toCTypeStr;
 const interested_cursor_spelling = index_common.interested_cursor_spelling;
 
 const clang = cpp2ast.clang;
@@ -108,11 +109,8 @@ fn generateEnumBindings(cursor: clang.Cursor, allocator: std.mem.Allocator, gen_
     var to_zig_enum: ToZig = undefined;
     if (!isCursorInteresting(enum_ty.cursor, allocator, &to_zig_enum)) return;
 
-    const tag_type_str = switch (enum_ty.tag_type) {
-        .Bool, .Int => "c_int",
-        .UInt => "c_uint",
-        else => unreachable,
-    };
+    const tag_type_str = try toCTypeStr(enum_ty.cursor.c_type(), allocator);
+    defer allocator.free(tag_type_str);
 
     var used_variant_values: [800]bool = std.mem.zeroes([800]bool);
     var decl_variants = std.ArrayList([]const u8).init(allocator);

@@ -81,3 +81,30 @@ pub const toZigTypeStr = struct {
         };
     }
 }.func;
+
+// includes `c.` prefix for non primitive types
+pub const toCTypeStr = struct {
+    fn func(c_type: clang.Type, space_creator: std.mem.Allocator) ![]const u8 {
+        const tag_type = t.TypeTag.fromType(c_type);
+        return switch (tag_type) {
+            .UInt, .Int, .Float => space_creator.dupe(u8, CNumberToZigTypeStr(c_type, tag_type)),
+            .Pointer, .Array => blk: {
+                const child_c_type = c_type.pointeeType() orelse c_type.elemType() orelse unreachable;
+                const child_type_str = try @This().func(child_c_type, space_creator);
+                defer space_creator.free(child_type_str);
+                if (c_type.isConst()) {
+                    break :blk std.fmt.allocPrint(space_creator, "[*c]const {s}", .{child_type_str});
+                } else {
+                    break :blk std.fmt.allocPrint(space_creator, "[*c]{s}", .{child_type_str});
+                }
+            },
+            else => blk: {
+                // arena allocator is probably best for such cases...
+                const type_spelling = @constCast(try c_type.spelling(space_creator));
+                defer space_creator.free(type_spelling);
+                std.mem.replaceScalar(u8, type_spelling, ' ', '_');
+                break :blk std.fmt.allocPrint(space_creator, "c.{s}", .{type_spelling});
+            },
+        };
+    }
+}.func;

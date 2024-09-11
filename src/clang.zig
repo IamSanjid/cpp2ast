@@ -722,11 +722,8 @@ pub const Index = struct {
     }
 
     pub fn createWithOptions(options: IndexOptions) Self {
-        return Self{
-            .native = c.clang_createIndexWithOptions(
-                c.CXIndexOptions_castAsPtr(@as(*anyopaque, @constCast(&options.native()))),
-            ),
-        };
+        // TODO: Support everything of IndexOptions hope so this becomes a thing sooner https://github.com/ziglang/zig/pull/20896
+        return Self.create(options.ExcludeDeclarationsFromPCH, options.DisplayDiagnostics);
     }
 
     pub fn deinit(self: Self) void {
