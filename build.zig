@@ -54,17 +54,51 @@ pub fn build(b: *std.Build) !void {
 
     try buildModule(build_context);
     try buildTests(build_context);
-    try buildExamples(build_context);
+    try buildAndRunExamples(build_context);
+}
+
+fn runBootstrapAndCopy(
+    build_context: BuildContext,
+    bootstrap_artifact: *std.Build.Step.InstallArtifact,
+    module: *std.Build.Module,
+    inc_dir: std.Build.LazyPath,
+    basename: []const u8,
+) void {
+    const b = build_context.b;
+    const bootstrap_index = b.addRunArtifact(bootstrap_artifact.artifact);
+    bootstrap_index.step.dependOn(&bootstrap_artifact.step);
+
+    const zig_triple = build_context.options.target.result.zigTriple(b.allocator) catch @panic("OOM");
+    bootstrap_index.addArg(basename);
+    bootstrap_index.addDirectoryArg(inc_dir);
+    bootstrap_index.addArg(zig_triple);
+
+    const step1 = bootstrap_index.addOutputFileArg(basename);
+    const update_src_files = b.addUpdateSourceFiles();
+    const source_path = b.pathJoin(&.{ "src/clang-c", basename });
+    update_src_files.addCopyFileToSource(step1, source_path);
+    const generated_file = b.allocator.create(std.Build.GeneratedFile) catch @panic("OOM");
+    generated_file.step = &update_src_files.step;
+    generated_file.path = source_path;
+    const step2 = std.Build.LazyPath{ .generated = .{ .file = generated_file } };
+
+    // hack couldn't find a way to depend on the "bootstrap run step"...
+    const bootstrap_module_name = b.fmt("__bootstrap_{s}", .{basename});
+    module.addAnonymousImport(bootstrap_module_name, .{
+        .root_source_file = step2,
+    });
 }
 
 fn buildModule(build_context: BuildContext) !void {
     const b = build_context.b;
+
     const lib = b.addStaticLibrary(.{
         .name = PACKAGE_NAME,
         .root_source_file = b.path("src/lib.zig"),
         .target = build_context.options.target,
         .optimize = build_context.options.optimize,
     });
+    try addLibClangIncludes(&lib.root_module, build_context);
     try linkLibClangToCompileStep(lib, build_context);
     b.installArtifact(lib);
     installLibClangDlls(b, build_context.options);
@@ -74,7 +108,33 @@ fn buildModule(build_context: BuildContext) !void {
         .target = build_context.options.target,
         .optimize = build_context.options.optimize,
     });
+    try addLibClangIncludes(module, build_context);
     try linkLibClangToModule(module, build_context);
+
+    if (build_context.getClangIncludeDir()) |inc_dir| {
+        // private module for bootstrapping, it works for this specific "project layout"
+        const bootstrap_module = b.createModule(.{
+            .root_source_file = b.path("src/lib.zig"),
+            .target = build_context.options.target,
+            .optimize = build_context.options.optimize,
+        });
+        try addLibClangIncludes(bootstrap_module, build_context);
+        try linkLibClangToModule(bootstrap_module, build_context);
+        const bootstrap_exe = b.addExecutable(.{
+            .name = "bootstrap",
+            .root_source_file = b.path("bootstrap/bootstrap.zig"),
+            .target = build_context.options.target,
+            .optimize = build_context.options.optimize,
+        });
+        bootstrap_exe.root_module.addImport(PACKAGE_NAME, bootstrap_module);
+        const bootstrap_artifact = b.addInstallArtifact(bootstrap_exe, .{});
+        // Doesn't need to generate C sources since only `index.zig` needs to be generated, because of different `IndexOptions`
+        // sizes on different platforms. How thos were generated before bootstrap? examples... So it's really not a bootstrapper.
+        // Current bootstrap doesn't use `IndexOptions` that's why it kind of works.
+        // runBootstrapAndCopy(build_context, bootstrap_artifact, module, inc_dir, "glue.h");
+        // runBootstrapAndCopy(build_context, bootstrap_artifact, module, inc_dir, "glue.c");
+        runBootstrapAndCopy(build_context, bootstrap_artifact, module, inc_dir, "index.zig");
+    }
 }
 
 fn buildTests(build_context: BuildContext) !void {
@@ -86,20 +146,18 @@ fn buildTests(build_context: BuildContext) !void {
         .target = build_context.options.target,
         .optimize = build_context.options.optimize,
     });
-    try linkLibClangToCompileStep(test_comp, build_context);
+    try addLibClangIncludes(&test_comp.root_module, build_context);
+    test_comp.root_module.addImport(PACKAGE_NAME, b.modules.get(PACKAGE_NAME).?);
 
     const run_tests = b.addRunArtifact(test_comp);
     test_step.dependOn(&run_tests.step);
 }
 
-fn buildExamples(build_context: BuildContext) !void {
+fn buildAndRunExamples(build_context: BuildContext) !void {
     const b = build_context.b;
 
     const examples_build_cmd = b.addSystemCommand(&.{ "zig", "build", "run" });
     examples_build_cmd.setCwd(b.path("examples"));
-
-    examples_build_cmd.step.dependOn(&b.addRemoveDirTree(b.path("examples/zig-out")).step);
-    examples_build_cmd.step.dependOn(&b.addRemoveDirTree(b.path("examples/.zig-cache")).step);
 
     for (b.available_options_list.items) |avail_option| {
         if (b.user_input_options.get(avail_option.name)) |option| {
@@ -491,11 +549,17 @@ const LinkingLibClangInfo = struct {
     }
 };
 
-fn linkLibClangToModule(module: *std.Build.Module, build_context: BuildContext) !void {
+fn addLibClangIncludes(module: *std.Build.Module, build_context: BuildContext) !void {
     const b = module.owner;
-    const target = build_context.options.target;
-
     try addCCXXIncludes(module);
+    if (build_context.getClangIncludeDir()) |dir| {
+        module.addIncludePath(dir);
+    }
+    module.addIncludePath(b.path("src/clang-c/"));
+}
+
+fn linkLibClangToModule(module: *std.Build.Module, build_context: BuildContext) !void {
+    const target = build_context.options.target;
 
     const exclude_files: ?[]const []const u8 = &.{
         "libMLIRMlirOptMain.a",
@@ -510,12 +574,7 @@ fn linkLibClangToModule(module: *std.Build.Module, build_context: BuildContext) 
     if (absolutePathToLazyPath(build_context.options.libclang_libs_dir)) |lib_path| {
         module.addLibraryPath(lib_path);
     }
-
-    if (build_context.getClangIncludeDir()) |dir| {
-        module.addIncludePath(dir);
-    }
-    module.addIncludePath(b.path("src/clang-c/"));
-    module.addCSourceFile(.{ .file = b.path("src/clang-c/glue.c") });
+    module.addCSourceFile(.{ .file = build_context.b.path("src/clang-c/glue.c") });
 
     if (target.result.os.tag.isDarwin()) {
         // adding some homebrew and macport lib paths, we are adding these before trying to find libclang.so

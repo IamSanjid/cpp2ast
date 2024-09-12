@@ -723,7 +723,11 @@ pub const Index = struct {
 
     pub fn createWithOptions(options: IndexOptions) Self {
         // TODO: Support everything of IndexOptions hope so this becomes a thing sooner https://github.com/ziglang/zig/pull/20896
-        return Self.create(options.ExcludeDeclarationsFromPCH, options.DisplayDiagnostics);
+        // bootstrap will generate a new index.zig depending on the target, but good thing is bootstrap doesn't depend on this
+        // function that's why it won't going to do illegal behaviour.
+        return Self{
+            .native = c.clang_createIndexWithOptions(c.CXIndexOptions_castAsPtr(@as(*anyopaque, @constCast(&options.native())))),
+        };
     }
 
     pub fn deinit(self: Self) void {
@@ -736,11 +740,11 @@ pub const TranslationUnitOptions = struct {
     unsaved_files: ?[]c.CXUnsavedFile = null,
     record_detailed_preproessing: bool = false,
     skip_function_bodies: bool = false,
-    index_options: IndexOptions = .{},
+    index_options: ?IndexOptions = null,
 
     const Self = @This();
 
-    fn parseOptions(self: Self) c_uint {
+    fn toCTranslationUnitOptions(self: Self) c_uint {
         var parse_options: c_uint = 0;
         if (self.record_detailed_preproessing) {
             parse_options |= c.CXTranslationUnit_DetailedPreprocessingRecord;
@@ -752,7 +756,7 @@ pub const TranslationUnitOptions = struct {
         return parse_options;
     }
 
-    fn unsavedFilesData(self: Self) struct { [*c]c.CXUnsavedFile, c_uint } {
+    fn toCUnsavedFiles(self: Self) struct { ptr: [*c]c.CXUnsavedFile, len: c_uint } {
         var unsaved_files_ptr: [*c]c.CXUnsavedFile = undefined;
         var unsaved_files_len: c_uint = 0;
         if (self.unsaved_files) |uf| {
@@ -760,7 +764,7 @@ pub const TranslationUnitOptions = struct {
             unsaved_files_len = @intCast(uf.len);
         }
 
-        return .{ unsaved_files_ptr, unsaved_files_len };
+        return .{ .ptr = unsaved_files_ptr, .len = unsaved_files_len };
     }
 };
 
@@ -771,9 +775,12 @@ pub const TranslationUnit = struct {
 
     const Self = @This();
     pub fn parse(opt: TranslationUnitOptions) !Self {
-        const index = Index.createWithOptions(opt.index_options);
+        const index = if (opt.index_options) |idx_opt|
+            Index.createWithOptions(idx_opt)
+        else
+            Index.create(false, false);
 
-        const unsaved_files = opt.unsavedFilesData();
+        const unsaved_files = opt.toCUnsavedFiles();
 
         var translation_unit: c.CXTranslationUnit = undefined;
         try checkRetWithMsg(c.clang_parseTranslationUnit2(
@@ -781,9 +788,9 @@ pub const TranslationUnit = struct {
             null,
             opt.args.ptr,
             @intCast(opt.args.len),
-            unsaved_files[0],
-            unsaved_files[1],
-            opt.parseOptions(),
+            unsaved_files.ptr,
+            unsaved_files.len,
+            opt.toCTranslationUnitOptions(),
             &translation_unit,
         ), "Parsing translation unit failed...");
 

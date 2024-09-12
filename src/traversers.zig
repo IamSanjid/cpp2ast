@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const common = @import("common.zig");
 const clang = @import("clang.zig");
 const c = struct {
@@ -9,56 +10,301 @@ const BasicString = common.BasicString;
 
 const TEMP_FILE_NAME = "generate_temp.h";
 
-// TODO: Accept options?
-pub fn createTranslationUnitDefault(
-    allocator: std.mem.Allocator,
-    cpp_files: []const []const u8,
-    inc_dirs: []const []const u8,
-    system_inc_dirs: []const []const u8,
-) !clang.TranslationUnit {
-    var args = std.ArrayList([*:0]const u8).init(allocator);
-    var copied_inc_dirZ = std.ArrayList([:0]const u8).init(allocator);
-    defer {
-        for (copied_inc_dirZ.items) |inc_dirZ| {
-            allocator.free(inc_dirZ);
-        }
-        copied_inc_dirZ.deinit();
-        args.deinit();
+// https://github.com/ziglang/zig/blob/218cf059dd215282aa96d6b4715e68d533a4238e/src/codegen/llvm.zig#L40
+pub fn targetTripleZ(allocator: std.mem.Allocator, target: std.Target) ![:0]const u8 {
+    var llvm_triple = std.ArrayList(u8).init(allocator);
+    defer llvm_triple.deinit();
+
+    const llvm_arch = switch (target.cpu.arch) {
+        .arm => "arm",
+        .armeb => "armeb",
+        .aarch64 => if (target.abi == .ilp32) "aarch64_32" else "aarch64",
+        .aarch64_be => "aarch64_be",
+        .arc => "arc",
+        .avr => "avr",
+        .bpfel => "bpfel",
+        .bpfeb => "bpfeb",
+        .csky => "csky",
+        .dxil => "dxil",
+        .hexagon => "hexagon",
+        .loongarch32 => "loongarch32",
+        .loongarch64 => "loongarch64",
+        .m68k => "m68k",
+        .mips => "mips",
+        .mipsel => "mipsel",
+        .mips64 => "mips64",
+        .mips64el => "mips64el",
+        .msp430 => "msp430",
+        .powerpc => "powerpc",
+        .powerpcle => "powerpcle",
+        .powerpc64 => "powerpc64",
+        .powerpc64le => "powerpc64le",
+        .amdgcn => "amdgcn",
+        .riscv32 => "riscv32",
+        .riscv64 => "riscv64",
+        .sparc => "sparc",
+        .sparc64 => "sparc64",
+        .s390x => "s390x",
+        .thumb => "thumb",
+        .thumbeb => "thumbeb",
+        .x86 => "i386",
+        .x86_64 => "x86_64",
+        .xcore => "xcore",
+        .xtensa => "xtensa",
+        .nvptx => "nvptx",
+        .nvptx64 => "nvptx64",
+        .spirv => "spirv",
+        .spirv32 => "spirv32",
+        .spirv64 => "spirv64",
+        .lanai => "lanai",
+        .wasm32 => "wasm32",
+        .wasm64 => "wasm64",
+        .ve => "ve",
+
+        .kalimba,
+        .spu_2,
+        => unreachable, // Gated by hasLlvmSupport().
+    };
+    try llvm_triple.appendSlice(llvm_arch);
+
+    // Unlike CPU backends, GPU backends actually care about the vendor tag.
+    try llvm_triple.appendSlice(switch (target.cpu.arch) {
+        .amdgcn => if (target.os.tag == .mesa3d) "-mesa-" else "-amd-",
+        .nvptx, .nvptx64 => "-nvidia-",
+        .spirv64 => if (target.os.tag == .amdhsa) "-amd-" else "-unknown-",
+        else => "-unknown-",
+    });
+
+    const llvm_os = switch (target.os.tag) {
+        .freestanding => "unknown",
+        .dragonfly => "dragonfly",
+        .freebsd => "freebsd",
+        .fuchsia => "fuchsia",
+        .linux => "linux",
+        .ps3 => "lv2",
+        .netbsd => "netbsd",
+        .openbsd => "openbsd",
+        .solaris, .illumos => "solaris",
+        .windows, .uefi => "windows",
+        .zos => "zos",
+        .haiku => "haiku",
+        .rtems => "rtems",
+        .aix => "aix",
+        .cuda => "cuda",
+        .nvcl => "nvcl",
+        .amdhsa => "amdhsa",
+        .opencl => "unknown", // https://llvm.org/docs/SPIRVUsage.html#target-triples
+        .ps4 => "ps4",
+        .ps5 => "ps5",
+        .elfiamcu => "elfiamcu",
+        .mesa3d => "mesa3d",
+        .amdpal => "amdpal",
+        .hermit => "hermit",
+        .hurd => "hurd",
+        .wasi => "wasi",
+        .emscripten => "emscripten",
+        .macos => "macosx",
+        .ios => "ios",
+        .tvos => "tvos",
+        .watchos => "watchos",
+        .driverkit => "driverkit",
+        .shadermodel => "shadermodel",
+        .visionos => "xros",
+        .serenity => "serenity",
+        .vulkan => "vulkan",
+
+        .opengl,
+        .plan9,
+        .contiki,
+        .other,
+        => "unknown",
+    };
+    try llvm_triple.appendSlice(llvm_os);
+
+    if (target.os.tag.isDarwin()) {
+        const min_version = target.os.version_range.semver.min;
+        try llvm_triple.writer().print("{d}.{d}.{d}", .{
+            min_version.major,
+            min_version.minor,
+            min_version.patch,
+        });
     }
-    for (system_inc_dirs) |system_inc_dir| {
+    try llvm_triple.append('-');
+
+    const llvm_abi = switch (target.abi) {
+        .none, .ilp32 => "unknown",
+        .gnu => "gnu",
+        .gnuabin32 => "gnuabin32",
+        .gnuabi64 => "gnuabi64",
+        .gnueabi => "gnueabi",
+        .gnueabihf => "gnueabihf",
+        .gnuf32 => "gnuf32",
+        .gnusf => "gnusf",
+        .gnux32 => "gnux32",
+        .gnuilp32 => "gnuilp32",
+        .code16 => "code16",
+        .eabi => "eabi",
+        .eabihf => "eabihf",
+        .android => "android",
+        .musl => "musl",
+        .musleabi => "musleabi",
+        .musleabihf => "musleabihf",
+        .muslx32 => "muslx32",
+        .msvc => "msvc",
+        .itanium => "itanium",
+        .cygnus => "cygnus",
+        .simulator => "simulator",
+        .macabi => "macabi",
+        .pixel => "pixel",
+        .vertex => "vertex",
+        .geometry => "geometry",
+        .hull => "hull",
+        .domain => "domain",
+        .compute => "compute",
+        .library => "library",
+        .raygeneration => "raygeneration",
+        .intersection => "intersection",
+        .anyhit => "anyhit",
+        .closesthit => "closesthit",
+        .miss => "miss",
+        .callable => "callable",
+        .mesh => "mesh",
+        .amplification => "amplification",
+        .ohos => "ohos",
+    };
+    try llvm_triple.appendSlice(llvm_abi);
+
+    return llvm_triple.toOwnedSliceSentinel(0);
+}
+
+pub const DefaultTranslationUnitArgs = struct {
+    cpp_files: []const []const u8,
+    inc_dirs: []const []const u8 = &.{},
+    system_inc_dirs: []const []const u8 = &.{},
+    framework_dirs: []const []const u8 = &.{},
+    target: ?std.Target = builtin.target,
+    source_as_c: bool = false,
+    index_options: ?clang.IndexOptions = null,
+    print_args: bool = false,
+};
+
+// reference: https://github.com/ziglang/zig/blob/218cf059dd215282aa96d6b4715e68d533a4238e/src/Compilation.zig#L5326
+pub fn createTranslationUnitDefault(user_args: DefaultTranslationUnitArgs) !clang.TranslationUnit {
+    var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
+
+    const target = user_args.target orelse builtin.target;
+
+    var args = std.ArrayList([*:0]const u8).init(arena);
+    try args.append("--no-default-config");
+
+    const llvm_tripleZ = try targetTripleZ(arena, target);
+    try args.appendSlice(&[_][*:0]const u8{ "-target", llvm_tripleZ });
+
+    for (user_args.system_inc_dirs) |system_inc_dir| {
         try args.append("-isystem");
-
-        const system_inc_dirz = try allocator.dupeZ(u8, system_inc_dir);
-        errdefer allocator.free(system_inc_dirz);
-
-        try copied_inc_dirZ.append(system_inc_dirz);
+        const system_inc_dirz = try arena.dupeZ(u8, system_inc_dir);
         try args.append(system_inc_dirz);
     }
-    for (inc_dirs) |inc_dir| {
+    for (user_args.inc_dirs) |inc_dir| {
         try args.append("-I");
-
-        const inc_dirz = try allocator.dupeZ(u8, inc_dir);
-        errdefer allocator.free(inc_dirz);
-
-        try copied_inc_dirZ.append(inc_dirz);
+        const inc_dirz = try arena.dupeZ(u8, inc_dir);
         try args.append(inc_dirz);
     }
-    try args.append("--no-default-config");
+    for (user_args.framework_dirs) |framework_dir| {
+        try args.append("-F");
+        const framework_dirz = try arena.dupeZ(u8, framework_dir);
+        try args.append(framework_dirz);
+    }
+
+    if (target.isGnuLibC()) {
+        const target_version = target.os.version_range.linux.glibc;
+        const glibc_minor_define = try std.fmt.allocPrintZ(arena, "-D__GLIBC_MINOR__={d}", .{
+            target_version.minor,
+        });
+        try args.append(glibc_minor_define);
+    } else if (target.isMinGW()) {
+        try args.append("-D__MSVCRT_VERSION__=0xE00");
+
+        const minver: u16 = @truncate(@intFromEnum(target.os.getVersionRange().windows.min) >> 16);
+        try args.append(
+            try std.fmt.allocPrintZ(arena, "-D_WIN32_WINNT=0x{x:0>4}", .{minver}),
+        );
+    }
+
+    if (target.cpu.model.llvm_name) |llvm_name| {
+        try args.appendSlice(&[_][*:0]const u8{
+            "-Xclang", "-target-cpu", "-Xclang",
+        });
+        const llvm_nameZ = try arena.dupeZ(u8, llvm_name);
+        try args.append(llvm_nameZ);
+    }
+
+    const all_features_list = target.cpu.arch.allFeaturesList();
+    try args.ensureUnusedCapacity(all_features_list.len * 4);
+    for (all_features_list, 0..) |feature, index_usize| {
+        const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
+        const is_enabled = target.cpu.features.isEnabled(index);
+
+        if (feature.llvm_name) |llvm_name| {
+            args.appendSliceAssumeCapacity(&[_][*:0]const u8{ "-Xclang", "-target-feature", "-Xclang" });
+            const plus_or_minus = "-+"[@intFromBool(is_enabled)];
+            const arg = try std.fmt.allocPrintZ(arena, "{c}{s}", .{ plus_or_minus, llvm_name });
+            args.appendAssumeCapacity(arg);
+        }
+    }
+
+    switch (target.os.tag) {
+        .windows => {
+            if (target.abi.isGnu()) {
+                try args.append("-Wno-pragma-pack");
+            }
+        },
+        .macos => {
+            try args.ensureUnusedCapacity(2);
+            const ver = target.os.version_range.semver.min;
+            args.appendAssumeCapacity(try std.fmt.allocPrintZ(arena, "-mmacos-version-min={d}.{d}.{d}", .{
+                ver.major, ver.minor, ver.patch,
+            }));
+            args.appendAssumeCapacity("-Wno-overriding-option");
+        },
+        .ios => switch (target.cpu.arch) {
+            .x86, .x86_64 => {
+                const ver = target.os.version_range.semver.min;
+                try args.append(try std.fmt.allocPrintZ(
+                    arena,
+                    "-m{s}-simulator-version-min={d}.{d}.{d}",
+                    .{ @tagName(target.os.tag), ver.major, ver.minor, ver.patch },
+                ));
+            },
+            else => {
+                const ver = target.os.version_range.semver.min;
+                try args.append(try std.fmt.allocPrintZ(arena, "-m{s}-version-min={d}.{d}.{d}", .{
+                    @tagName(target.os.tag), ver.major, ver.minor, ver.patch,
+                }));
+            },
+        },
+        else => {},
+    }
+
+    if (target.cpu.arch.isThumb()) {
+        try args.append("-mthumb");
+    }
+
     try args.append("-x");
-    try args.append("c++");
+    try args.append(if (user_args.source_as_c) "c" else "c++");
     try args.append("-Xclang");
     try args.append("-std=c++20");
     try args.append("-DWIN32_LEAN_AND_MEAN");
     try args.append("-fparse-all-comments");
 
-    var temp_file_builder = BasicString.init(allocator);
-    defer temp_file_builder.deinit();
-    for (cpp_files) |cpp_file| {
+    var temp_file_builder = BasicString.init(arena);
+    for (user_args.cpp_files) |cpp_file| {
         try temp_file_builder.appendFmt("#include \"{s}\"\n", .{cpp_file});
     }
 
-    var temp_files = try allocator.alloc(c.CXUnsavedFile, 1);
-    defer allocator.free(temp_files);
+    var temp_files = try arena.alloc(c.CXUnsavedFile, 1);
     temp_files[0] = .{
         .Filename = TEMP_FILE_NAME,
         .Contents = temp_file_builder.c_str(),
@@ -67,91 +313,30 @@ pub fn createTranslationUnitDefault(
 
     try args.append(TEMP_FILE_NAME);
 
+    if (user_args.print_args) {
+        std.debug.print("Clang Args:\n", .{});
+        for (args.items) |arg| {
+            std.debug.print("{s} ", .{arg});
+        }
+        std.debug.print("\n", .{});
+    }
+
     return clang.TranslationUnit.parse(.{
         .args = args.items,
         .unsaved_files = temp_files,
         .record_detailed_preproessing = true,
         .skip_function_bodies = false,
+        .index_options = user_args.index_options,
     });
 }
 
-// TODO: Make it not dummy?
-pub fn createDummyTranslationUnit(
-    allocator: std.mem.Allocator,
-    cpp_file_path: []const u8,
-) !clang.TranslationUnit {
+pub fn createDummyTranslationUnit(cpp_file_path: []const u8) !clang.TranslationUnit {
     const include_dir = @import("c_cxx_includes").clang_rt;
 
-    return createTranslationUnitDefault(
-        allocator,
-        &.{cpp_file_path},
-        &.{},
-        &.{include_dir},
-    );
-
-    //var argv = std.ArrayList([*:0]const u8).init(allocator);
-    //defer argv.deinit();
-    //try argv.append("-isystem");
-    //try argv.append(clang_runtime.include_dir.ptr);
-    //try argv.append("-x");
-    //try argv.append("c++");
-    //try argv.append("-std=c++20");
-    //try argv.append("-DWIN32_LEAN_AND_MEAN");
-    //try argv.append("-fparse-all-comments");
-
-    //var temp_file_builder = BasicString.init(allocator);
-    //defer temp_file_builder.deinit();
-    //try temp_file_builder.appendFmt("#include \"{s}\"\n", .{cpp_file_path});
-
-    //var temp_files = try allocator.alloc(c.CXUnsavedFile, 1);
-    //defer allocator.free(temp_files);
-    //temp_files[0] = .{
-    //    .Filename = TEMP_FILE_NAME,
-    //    .Contents = temp_file_builder.c_str(),
-    //    .Length = @intCast(temp_file_builder.len),
-    //};
-
-    //try argv.append(TEMP_FILE_NAME);
-
-    //return clang.TranslationUnit.parse(.{
-    //    .argv = argv.items,
-    //    .unsaved_files = temp_files,
-    //    .skip_function_bodies = true,
-    //});
-
-    //var translation_unit: c.CXTranslationUnit = undefined;
-    //try clang.checkRetWithMsg(c.clang_parseTranslationUnit2(
-    //    index,
-    //    null,
-    //    argv.items.ptr,
-    //    @intCast(argv.items.len),
-    //    temp_files.ptr,
-    //    @intCast(temp_files.len),
-    //    c.CXTranslationUnit_DetailedPreprocessingRecord | c.CXTranslationUnit_SkipFunctionBodies,
-    //    &translation_unit,
-    //), "Parsing translation unit failed...");
-
-    //var err: c_int = 0;
-    //const num_diagnostics = c.clang_getNumDiagnostics(translation_unit);
-    //if (num_diagnostics > 0) {
-    //    std.debug.print("\nClang says:\n", .{});
-    //    for (0..num_diagnostics) |i| {
-    //        const diag = c.clang_getDiagnostic(translation_unit, @intCast(i));
-    //        const severity = c.clang_getDiagnosticSeverity(diag);
-
-    //        if (severity == c.CXDiagnostic_Fatal or severity == c.CXDiagnostic_Error) {
-    //            err = 1;
-    //        }
-
-    //        const @"struct" = c.clang_formatDiagnostic(diag, c.clang_defaultDiagnosticDisplayOptions());
-    //        std.debug.print("{s}\n", .{c.clang_getCString(@"struct")});
-    //        c.clang_disposeString(@"struct");
-    //    }
-    //}
-
-    //try clang.checkRet(err);
-
-    //return translation_unit;
+    return createTranslationUnitDefault(.{
+        .cpp_files = &.{cpp_file_path},
+        .inc_dirs = &.{include_dir},
+    });
 }
 
 const CursorList = std.ArrayList(clang.Cursor);
@@ -750,10 +935,7 @@ test "enum type info test" {
 
     const allocator = std.testing.allocator;
 
-    var translation_unit = try createDummyTranslationUnit(
-        allocator,
-        cpp_file_path,
-    );
+    var translation_unit = try createDummyTranslationUnit(cpp_file_path);
     defer translation_unit.deinit();
     try translation_unit.printAndCheckDiags();
 
@@ -900,10 +1082,7 @@ test "basic method/function info" {
 
     const allocator = std.testing.allocator;
 
-    var translation_unit = try createDummyTranslationUnit(
-        allocator,
-        cpp_file_path,
-    );
+    var translation_unit = try createDummyTranslationUnit(cpp_file_path);
     defer translation_unit.deinit();
     try translation_unit.printAndCheckDiags();
 
@@ -1022,10 +1201,7 @@ test "struct/class type info" {
 
     const allocator = std.testing.allocator;
 
-    var translation_unit = try createDummyTranslationUnit(
-        allocator,
-        cpp_file_path,
-    );
+    var translation_unit = try createDummyTranslationUnit(cpp_file_path);
     defer translation_unit.deinit();
     try translation_unit.printAndCheckDiags();
 
@@ -1397,10 +1573,7 @@ test "basic cursor manipulatons" {
 
     const allocator = std.testing.allocator;
 
-    var translation_unit = try createDummyTranslationUnit(
-        allocator,
-        cpp_file_path,
-    );
+    var translation_unit = try createDummyTranslationUnit(cpp_file_path);
     defer translation_unit.deinit();
     try translation_unit.printAndCheckDiags();
 
