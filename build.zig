@@ -57,36 +57,25 @@ pub fn build(b: *std.Build) !void {
     try buildAndRunExamples(build_context);
 }
 
-fn runBootstrapAndCopy(
-    build_context: BuildContext,
-    bootstrap_artifact: *std.Build.Step.InstallArtifact,
-    module: *std.Build.Module,
-    inc_dir: std.Build.LazyPath,
-    basename: []const u8,
-) void {
+fn bootstrapSrcs(build_context: BuildContext, bootstrap_artifact: *std.Build.Step.InstallArtifact, inc_dir: std.Build.LazyPath, basenames: []const []const u8,) *std.Build.Step {
     const b = build_context.b;
-    const bootstrap_index = b.addRunArtifact(bootstrap_artifact.artifact);
-    bootstrap_index.step.dependOn(&bootstrap_artifact.step);
-
     const zig_triple = build_context.options.target.result.zigTriple(b.allocator) catch @panic("OOM");
-    bootstrap_index.addArg(basename);
-    bootstrap_index.addDirectoryArg(inc_dir);
-    bootstrap_index.addArg(zig_triple);
 
-    const step1 = bootstrap_index.addOutputFileArg(basename);
-    const update_src_files = b.addUpdateSourceFiles();
-    const source_path = b.pathJoin(&.{ "src/clang-c", basename });
-    update_src_files.addCopyFileToSource(step1, source_path);
-    const generated_file = b.allocator.create(std.Build.GeneratedFile) catch @panic("OOM");
-    generated_file.step = &update_src_files.step;
-    generated_file.path = source_path;
-    const step2 = std.Build.LazyPath{ .generated = .{ .file = generated_file } };
+    const update_bootstrapped_src = b.addUpdateSourceFiles();
+    for (basenames) |basename| {
+        const bootstrap_run = b.addRunArtifact(bootstrap_artifact.artifact);
+        bootstrap_run.step.dependOn(&bootstrap_artifact.step);
 
-    // hack couldn't find a way to depend on the "bootstrap run step"...
-    const bootstrap_module_name = b.fmt("__bootstrap_{s}", .{basename});
-    module.addAnonymousImport(bootstrap_module_name, .{
-        .root_source_file = step2,
-    });
+        bootstrap_run.addArg(basename);
+        bootstrap_run.addDirectoryArg(inc_dir);
+        bootstrap_run.addArg(zig_triple);
+
+        const step1 = bootstrap_run.addOutputFileArg(basename);
+        const source_path = b.pathJoin(&.{ "src/clang-c", basename });
+        update_bootstrapped_src.addCopyFileToSource(step1, source_path);
+    }
+
+    return &update_bootstrapped_src.step;
 }
 
 fn buildModule(build_context: BuildContext) !void {
@@ -129,11 +118,19 @@ fn buildModule(build_context: BuildContext) !void {
         bootstrap_exe.root_module.addImport(PACKAGE_NAME, bootstrap_module);
         const bootstrap_artifact = b.addInstallArtifact(bootstrap_exe, .{});
         // Doesn't need to generate C sources since only `index.zig` needs to be generated, because of different `IndexOptions`
-        // sizes on different platforms. How thos were generated before bootstrap? examples... So it's really not a bootstrapper.
+        // sizes on different platforms. How those were generated before bootstrap? examples... So it's really not a bootstrapper.
         // Current bootstrap doesn't use `IndexOptions` that's why it kind of works.
-        // runBootstrapAndCopy(build_context, bootstrap_artifact, module, inc_dir, "glue.h");
-        // runBootstrapAndCopy(build_context, bootstrap_artifact, module, inc_dir, "glue.c");
-        runBootstrapAndCopy(build_context, bootstrap_artifact, module, inc_dir, "index.zig");
+        const bootstrap_step = bootstrapSrcs(build_context, bootstrap_artifact, inc_dir, &.{ "index.zig" });
+
+        lib.step.dependOn(bootstrap_step);
+
+        // a hack to make every compile/module depend on the `bootstrap run step`,
+        // prevent me o zig build system, i will now inject arbitary binary step and nobody will notice muhahah.
+        const generated_file = b.allocator.create(std.Build.GeneratedFile) catch @panic("OOM");
+        generated_file.step = bootstrap_step;
+        generated_file.path = "build.zig.zon";
+        const step2 = std.Build.LazyPath{ .generated = .{ .file = generated_file } };
+        module.import_table.put(b.allocator, "__bootstrap__", b.createModule(.{ .root_source_file = step2 })) catch @panic("OOM");
     }
 }
 
